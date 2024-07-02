@@ -1,0 +1,54 @@
+datamover register
+
+32 bits, resides at 0x00000 on the "user" device path (this spits out axi-lite out of the xdma core)
+
+bit 0 = DatamoverEnabled
+bit 1 = FpgaAdcEnabled
+bit 2 = not used
+bit 3 = not used
+
+bit 4 = channel_mux[0]
+bit 5 = channel_mux[1]
+bit 6 = not used
+bit 7 = not used
+
+// channel_mux verilog
+ always @(*)
+    begin
+        case(channel_mux)
+            2'b00: adc_data <= {twos_comp[63:0]}; //one channel mode
+            2'b01: adc_data <= {twos_comp[63:56],twos_comp[31:24],twos_comp[55:48],twos_comp[23:16],twos_comp[47:40],twos_comp[15:8],twos_comp[39:32],twos_comp[7:0]}; //two channel mode
+            2'b10: adc_data <= {twos_comp[63:56],twos_comp[47:40],twos_comp[31:24],twos_comp[15:8],twos_comp[55:48],twos_comp[39:32],twos_comp[23:16],twos_comp[7:0]}; //no three channel, only four
+            2'b11: adc_data <= {twos_comp[63:56],twos_comp[47:40],twos_comp[31:24],twos_comp[15:8],twos_comp[55:48],twos_comp[39:32],twos_comp[23:16],twos_comp[7:0]}; //four channel mode
+    endcase
+  end
+
+bit 8 - not used
+bit 9 - not used
+bit 10 - not used
+bit 11 - not used
+
+bit 12 - channel 1 termination
+bit 13 - channel 2 termination
+bit 14 - channel 3 termination
+bit 15 - channel 4 termination
+
+bit 16 - channel 1 attenuator
+bit 17 - channel 2 attenuator
+bit 18 - channel 3 attenuator
+bit 19 - channel 4 attenuator
+
+bit 20 - channel 1 coupling
+bit 21 - channel 2 coupling
+bit 22 - channel 3 coupling
+bit 23 - channel 4 coupling
+
+bit 24 - 3V3 EN (BoardEnabled)
+bit 25 - clock gen reset_n (PllEnabled)
+bit 26 - 5V EN (FrontEndEnabled)
+bit 27 - not used
+
+bit 28 - not used
+bit 29 - not used
+bit 30 - not used
+bit 31 - not used

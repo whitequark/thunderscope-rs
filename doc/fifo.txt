@@ -1,0 +1,3 @@
+i2c:     0xFF
+adc spi: 0xFD
+pga spi: 0xFB-channel(0-based)

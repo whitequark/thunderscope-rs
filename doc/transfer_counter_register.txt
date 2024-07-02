@@ -1,0 +1,42 @@
+transfer counter register
+
+32 bits, resides at 0x00008 on the "user" device path (this spits out axi-lite out of the xdma core and converts to GPIO)
+
+        private void UpdateBufferHead()
+        {
+            // 1 page = 4k
+            uint transfer_counter = Read32(BarRegister.DATAMOVER_TRANSFER_COUNTER);
+            uint error_code = transfer_counter >> 30;
+            if ((error_code & 2) > 0)
+                throw new Exception("Thunderscope - datamover error");
+
+            if ((error_code & 1) > 0)
+                throw new ThunderscopeFifoOverflowException("Thunderscope - FIFO overflow");
+
+            uint overflow_cycles = transfer_counter >> 16 & 0x3FFF;
+            if (overflow_cycles > 0)
+                throw new Exception("Thunderscope - pipeline overflow");
+
+            uint pages_moved = transfer_counter & 0xFFFF;
+            ulong buffer_head = hardwareState.BufferHead & ~0xFFFFUL | pages_moved;
+            if (buffer_head < hardwareState.BufferHead)
+                buffer_head += 0x10000UL;
+
+            hardwareState.BufferHead = buffer_head;
+
+            ulong pages_available = hardwareState.BufferHead - hardwareState.BufferTail;
+            if (pages_available >= hardwareState.RamSizePages)
+                throw new ThunderscopeMemoryOutOfMemoryException("Thunderscope - memory full");
+        }
+
+bit 31 - datamover error
+- this is death, very odd error that seems to persist after power off, no idea why - haven't seen it in a long time, may have been fixed in latest gateware
+bit 30 - FIFO overflow
+- this is the fifo in front of the datamover, if this overflows, its a problem in DRAM (should never happen! - haven't seen since fixed in latest gateware)
+
+bits 29-16 - overflow cycles
+- how many cycles did it overflow for - only for debugging, this is covered by the sticky bit 30 FIFO error
+
+bits 15-0 - pages_moved - how many 4kB transfers the datamover has written into the ddr3
+- if this value - it's value at the last read is over the ddr3 size, that's a "scope out of memory error"
+- essentialy a FIFO overflow for the ddr3, which we have to set up software side as a circular buffer
