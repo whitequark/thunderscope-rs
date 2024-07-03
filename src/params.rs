@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::fmt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Termination {
     Ohm50,
@@ -95,9 +97,15 @@ impl Filtering {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct OffsetMagnitude {
     code: u16,
+}
+
+impl fmt::Debug for OffsetMagnitude {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "OffsetMagnitude::from_ohms({})", self.ohms())
+    }
 }
 
 impl Default for OffsetMagnitude {
@@ -113,11 +121,13 @@ impl OffsetMagnitude {
 
     pub(crate) fn from_ohms(ohms: u32) -> Self {
         assert!(ohms >= 75 && ohms <= 50000 + 75);
-        OffsetMagnitude { code: ((ohms - 75) * 128 / 50000) as u16 }
+        const HALF_LSB: u32 = (50000 / 128) / 2;
+        let code = (ohms - 75 + /* round to nearest */HALF_LSB) * 128 / 50000;
+        OffsetMagnitude { code: code as u16 }
     }
 
     pub(crate) fn ohms(self) -> u32 {
-        self.code as u32 * (50000 / 128) + 75
+        self.code as u32 * 50000 / 128 + 75
     }
 }
 

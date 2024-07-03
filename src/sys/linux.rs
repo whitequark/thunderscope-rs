@@ -18,7 +18,7 @@ impl Fd {
         }
     }
 
-    fn read_at(&mut self, offset: usize, data: &mut [u8]) -> io::Result<()> {
+    fn read_at(&self, offset: usize, data: &mut [u8]) -> io::Result<()> {
         unsafe {
             let bytes_read = libc::pread(self.0, data.as_mut_ptr() as *mut c_void, data.len(), offset as i64) as usize;
             if bytes_read != data.len() {
@@ -29,7 +29,7 @@ impl Fd {
         }
     }
 
-    fn write_at(&mut self, offset: usize, data: &[u8]) -> io::Result<()> {
+    fn write_at(&self, offset: usize, data: &[u8]) -> io::Result<()> {
         unsafe {
             let bytes_written = libc::pwrite(self.0, data.as_ptr() as *const c_void, data.len(), offset as i64) as usize;
             if bytes_written != data.len() {
@@ -51,6 +51,7 @@ impl Drop for Fd {
     }
 }
 
+#[derive(Debug)]
 pub struct ThunderscopeDriverImpl {
     user_fd: Fd,
     d2h_fd: Fd,
@@ -68,15 +69,15 @@ impl ThunderscopeDriverImpl {
 }
 
 impl super::Driver for ThunderscopeDriverImpl {
-    fn read_user(&mut self, addr: usize, data: &mut [u8]) -> Result<()> {
+    fn read_user(&self, addr: usize, data: &mut [u8]) -> Result<()> {
         Ok(self.user_fd.read_at(addr, data)?)
     }
 
-    fn write_user(&mut self, addr: usize, data: &[u8]) -> Result<()> {
+    fn write_user(&self, addr: usize, data: &[u8]) -> Result<()> {
         Ok(self.user_fd.write_at(addr, data)?)
     }
 
-    fn read_d2h(&mut self, addr: usize, data: &mut [u8]) -> Result<()> {
+    fn read_d2h(&self, addr: usize, data: &mut [u8]) -> Result<()> {
         Ok(self.d2h_fd.read_at(addr, data)?)
     }
 }

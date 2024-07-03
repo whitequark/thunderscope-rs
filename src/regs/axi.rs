@@ -85,8 +85,8 @@ impl Status {
         (self.bits() >> 16) & 0x3FFF
     }
 
-    pub fn pages_moved(self) -> u32 {
-        (self.bits() >> 0) & 0xFFFF
+    pub fn pages_moved(self) -> usize {
+        ((self.bits() >> 0) & 0xFFFF) as usize
     }
 }
 
