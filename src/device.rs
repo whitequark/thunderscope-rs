@@ -6,6 +6,9 @@ use crate::sys::Driver;
 use crate::regs::axi::{self, Control, FifoIsr, Status};
 use crate::regs::hmc;
 
+const SPI_BUS_ADC: u8 = 0;
+const SPI_BUS_PGA: [u8; 4] = [2, 3, 4, 5];
+
 #[derive(Debug)]
 pub struct Device<D: Driver> {
     driver: D,
@@ -22,20 +25,20 @@ impl Device<crate::sys::imp::ThunderscopeDriverImpl> {
 
 impl<D: Driver> Device<D> {
     pub fn startup(&mut self) -> Result<()> {
-        let mut control = Control::Rail3V3Enabled | Control::ClockGenResetN;
-        self.write_control(control)?;
-        sleep(Duration::from_millis(10)); // wait for the rail to stabilize
+        // enable the 3V3 rail and wait for it to stabilize
+        self.write_control(Control::ClockGenResetN | Control::Rail3V3Enabled)?;
+        sleep(Duration::from_millis(10));
 
-        // reset the PLL
-        control.remove(Control::ClockGenResetN);
-        self.write_control(control)?;
-        // wait for the PLL to reset
-        sleep(Duration::from_millis(10));
-        // start the PLL
-        control.insert(Control::ClockGenResetN);
-        self.write_control(control)?;
-        // wait for the PLL to start
-        sleep(Duration::from_millis(10));
+        // The RSTN pin must be asserted once after power-up.
+        // Reset should be asserted for at least 1μs.
+        self.modify_control(|val| val.remove(Control::ClockGenResetN))?;
+        sleep(Duration::from_micros(100));
+
+        // System software must wait at least 100μs after RSTN is deasserted
+        // and wait for GLOBISR.BCDONE=1 before configuring the device.
+        self.modify_control(|val| val.insert(Control::ClockGenResetN))?;
+        sleep(Duration::from_millis(1));
+
         // configure the PLL using the Rev4 blob
         self.init_pll_registers(&[
             0x042308, 0x000301, 0x000402, 0x000521,
@@ -47,13 +50,12 @@ impl<D: Driver> Device<D> {
             0x018000, 0x020080, 0x020105, 0x025080,
             0x025102, 0x04300C, 0x043000
         ])?;
-        // wait for the PLL to configure
         sleep(Duration::from_millis(10));
+
         // align the PLL output phases
         self.init_pll_registers(&[
             0x010002, 0x010042
         ])?;
-        // wait for the PLL output phases to align
         sleep(Duration::from_millis(10));
 
         // configure the ADC, but leave it powered down or it'll be very unhappy about its clock
@@ -80,12 +82,19 @@ impl<D: Driver> Device<D> {
             // set ADC to ramp test mode
             (hmc::ADDR_HMCAD1520_LVDS_PATTERN, 1<<6),
         ])?;
+
         // enable all ADC channels; this also enables the data mover
         self.set_adc_channels([true, true, true, true])?;
 
         // enable the frontend
-        control.insert(Control::Rail5VEnabled);
-        self.write_control(control)?;
+        self.modify_control(|val| val.insert(Control::Rail5VEnabled))?;
+        sleep(Duration::from_millis(5));
+
+        // turn off aux output of PGAs as soon as rail is up to keep current consumption in check
+        self.set_pga(0)?;
+        self.set_pga(1)?;
+        self.set_pga(2)?;
+        self.set_pga(3)?;
 
         // done!
         Ok(())
@@ -135,10 +144,28 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
+    pub fn set_pga(&mut self, channel: usize) -> Result<()> {
+        // Hardcoded gain and anti-aliasing filter settings for now
+        // Will need some sort of structure to hold this info per channel
+        let aux_off: bool = true; // high disables aux output
+        let filter_val: u8 = 0x0; // 4 bits, 0 is full BW
+        let preamp_high_gain: bool = false;
+        let ladder_atten_val: u8 = 0x9; // 4 bits, 9 is POR value
+
+        self.write_pga_command(SPI_BUS_PGA[channel],
+            (aux_off as u16) << 10 |
+            (filter_val as u16) << 5 |
+            (preamp_high_gain as u16) << 4 |
+            (ladder_atten_val as u16) & 0x0f
+        )
+    }
+
     pub fn read_data(&mut self) -> Result<()> {
         let mut data = Vec::new();
         data.resize(1 << 23, 0);
         self.driver.read_d2h(0, &mut data[..])?;
+        let status = self.read_status()?;
+        log::debug!("pages_moved = {:?}", status.pages_moved());
         std::fs::write("test.data", &data[..])?;
         Ok(())
     }
@@ -176,6 +203,12 @@ impl<D: Driver> Device<D> {
         Ok(self.write_user_u32(axi::ADDR_CONTROL, value.bits())?)
     }
 
+    pub fn modify_control<F: FnOnce(&mut Control)>(&mut self, f: F) -> Result<()> {
+        let mut value = self.read_control()?;
+        f(&mut value);
+        self.write_control(value)
+    }
+
     pub fn read_status(&mut self) -> Result<Status> {
         let value = Status::from_bits_retain(self.read_user_u32(axi::ADDR_STATUS)?);
         log::debug!("read_status() = {:?}", value);
@@ -183,23 +216,18 @@ impl<D: Driver> Device<D> {
     }
 
     pub fn disable_datamover(&mut self) -> Result<()> {
-        let mut control = self.read_control()?;
         // halt the data mover
-        control.remove(Control::DatamoverHaltN);
-        self.write_control(control)?;
+        self.modify_control(|val| val.remove(Control::DatamoverHaltN))?;
         // wait for data mover to halt
         sleep(Duration::from_millis(5));
         // reset the acquisition subsystem
-        control.remove(Control::FpgaAcqResetN);
-        self.write_control(control)?;
+        self.modify_control(|val| val.remove(Control::FpgaAcqResetN))?;
         Ok(())
     }
 
     pub fn enable_datamover(&mut self) -> Result<()> {
-        let mut control = self.read_control()?;
         // take the acquisition system out of reset
-        control.insert(Control::DatamoverHaltN | Control::FpgaAcqResetN);
-        self.write_control(control)?;
+        self.modify_control(|val| val.insert(Control::DatamoverHaltN | Control::FpgaAcqResetN))?;
         Ok(())
     }
 
@@ -226,14 +254,32 @@ impl<D: Driver> Device<D> {
     pub fn write_i2c(&mut self, i2c_addr: u8, data: &[u8]) -> Result<()> {
         log::debug!("write_i2c({:#08b}, {:02x?})", i2c_addr, data);
         let mut packet = Vec::<u8>::new();
-        packet.push(0xff);     // select I2C
+        packet.push(0xff);        // select I2C
         packet.push(i2c_addr);
         packet.extend_from_slice(data);
-        self.write_fifo(&packet[..])
+        self.write_fifo(packet.as_ref())?;
+        // the I2C engine doesn't use TLAST to detect packet boundaries and runs at 400 kHz;
+        // make sure the engine is  done before releasing it. the delay has a 100% safety factor.
+        sleep(Duration::from_micros((50 * data.len()) as u64));
+        Ok(())
+    }
+
+    // bus 0 (0xfd): ADC
+    // bus 2..5 (0xfb..0xf7): PGAn
+    pub fn write_spi(&mut self, spi_bus: u8, data: &[u8]) -> Result<()> {
+        log::debug!("write_spi({:?}, {:02x?})", spi_bus, data);
+        let mut packet = Vec::<u8>::new();
+        packet.push(0xfd - spi_bus);
+        packet.extend_from_slice(data);
+        self.write_fifo(packet.as_ref())?;
+        // the SPI engine doesn't use TLAST either, but it runs at 16 MHz. the delay is enough
+        // for 160 bytes.
+        sleep(Duration::from_micros(10));
+        Ok(())
     }
 
     pub fn write_pll_register(&mut self, reg_addr: u16, value: u8) -> Result<()> {
-        log::debug!("set_pll_register({:#06x}, {:#04x})", reg_addr, value);
+        log::debug!("write_pll_register({:#06x}, {:#04x})", reg_addr, value);
         self.write_i2c(0b11101000, &[
             0x02,                  // register write
             (reg_addr >> 8) as u8, // register address high
@@ -250,9 +296,8 @@ impl<D: Driver> Device<D> {
     }
 
     pub fn write_adc_register(&mut self, reg_addr: u8, value: u16) -> Result<()> {
-        log::debug!("set_adc_register({:#04x}, {:#06x})", reg_addr, value);
-        self.write_fifo(&[
-            0xfd,
+        log::debug!("write_adc_register({:#04x}, {:#06x})", reg_addr, value);
+        self.write_spi(SPI_BUS_ADC, &[
             reg_addr,
             (value >> 8) as u8,
             (value >> 0) as u8,
@@ -264,5 +309,14 @@ impl<D: Driver> Device<D> {
             self.write_adc_register(reg_addr, value)?;
         }
         Ok(())
+    }
+
+    pub fn write_pga_command(&mut self, pga_bus: u8, command: u16) -> Result<()> {
+        log::debug!("write_pga_command({:?}, {:#06x})", pga_bus, command);
+        self.write_spi(pga_bus, &[
+            0x00, // write command word
+            (command >> 8) as u8,
+            (command >> 0) as u8,
+        ])
     }
 }
