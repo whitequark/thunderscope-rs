@@ -6,9 +6,8 @@ fn main() -> thunderscope::Result<()> {
 
     let mut device = thunderscope::Device::new()?;
     device.startup()?;
-    sleep(Duration::from_millis(10));
+    sleep(Duration::from_secs(1));
     device.read_data()?;
-    sleep(Duration::from_secs(10));
     device.teardown()?;
 
     Ok(())

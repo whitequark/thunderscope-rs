@@ -80,7 +80,7 @@ impl<D: Driver> Device<D> {
             (hmc::ADDR_HMCAD1520_LVDS_PHASE, 0x0060),
             (hmc::ADDR_HMCAD1520_LVDS_DRIVE, 0x0222),
             // set ADC to ramp test mode
-            (hmc::ADDR_HMCAD1520_LVDS_PATTERN, 1<<6),
+            // (hmc::ADDR_HMCAD1520_LVDS_PATTERN, 1<<6),
         ])?;
 
         // enable all ADC channels; this also enables the data mover
@@ -90,11 +90,16 @@ impl<D: Driver> Device<D> {
         self.modify_control(|val| val.insert(Control::Rail5VEnabled))?;
         sleep(Duration::from_millis(5));
 
-        // turn off aux output of PGAs as soon as rail is up to keep current consumption in check
-        self.set_pga(0)?;
-        self.set_pga(1)?;
-        self.set_pga(2)?;
-        self.set_pga(3)?;
+        // turn off aux output of PGAs as soon as rail is up to keep current consumption in check;
+        // the aux output on all PGAs together consumes almost 2W
+        for index in 0..4 {
+            self.set_pga(index)?;
+        }
+
+        self.modify_control(|val| {
+            val.insert(Control::Ch1Attenuator | Control::Ch2Attenuator |
+                Control::Ch3Attenuator | Control::Ch4Attenuator);
+        })?;
 
         // done!
         Ok(())
@@ -102,27 +107,36 @@ impl<D: Driver> Device<D> {
 
     pub fn set_adc_channels(&mut self, enabled: [bool; 4]) -> Result<()> {
         // compute number of enabled ADC channels and ADC clock divisor
-        let clkdiv;
-        let chnum;
+        // channels CH1..CH4 on the faceplate are mapped to IN4..IN1 on the ADC, so this function
+        // has to perform a really annoying permutation
+        let clkdiv; // in ADC
+        let chnum;  // in ADC
+        let chmux;  // in FPGA
         match enabled.iter().map(|&en| en as u8).sum() {
-            1 => { clkdiv = 0; chnum = 1; }
-            2 => { clkdiv = 1; chnum = 2; }
-            3 => { clkdiv = 2; chnum = 4; } // same as 4
-            4 => { clkdiv = 2; chnum = 4; }
+            1 => { clkdiv = 0; chnum = 1; chmux = Control::empty(); }
+            2 => { clkdiv = 1; chnum = 2; chmux = Control::ChannelMux0; }
+            3 => { clkdiv = 2; chnum = 4; chmux = Control::ChannelMux1; } // same as 4
+            4 => { clkdiv = 2; chnum = 4; chmux = Control::ChannelMux1; }
             _ => panic!("unsupported channel configuration"),
         };
-        // compute input select permutation
+        // compute ADC input select permutation
         let insel = match chnum {
             1 => {
-                let ch1_index = enabled.iter().position(|&en| en).unwrap();
+                let ch1_index = enabled.iter().rev().position(|&en| en).unwrap();
                 [ch1_index, ch1_index, ch1_index, ch1_index]
             }
             2 => {
-                let ch1_index = enabled.iter().position(|&en| en).unwrap();
-                let ch2_index = enabled.iter().skip(ch1_index + 1).position(|&en| en).unwrap();
-                [ch1_index, ch1_index, ch2_index, ch2_index]
+                let ch1_index = enabled.iter().rev().position(|&en| en).unwrap();
+                let ch2_index = ch1_index + 1 +
+                    enabled.iter().rev().skip(ch1_index + 1).position(|&en| en).unwrap();
+                // this is permuted later again
+                // the (faceplate) channel order in the data is ch1,ch2,ch1,ch2
+                [ch2_index, ch2_index, ch1_index, ch1_index]
             }
-            4 => [3, 2, 1, 0],
+            4 => {
+                // the (faceplate) channel order in the data is ch1,ch2,ch3,ch4
+                [3, 2, 1, 0]
+            }
             _ => unreachable!()
         };
         // put data mover into reset (it cannot run without ADC clock)
@@ -139,6 +153,11 @@ impl<D: Driver> Device<D> {
             (hmc::ADDR_HMCAD1520_INSEL12, 0x0200 << insel[1] | 0x0002 << insel[0]),
             (hmc::ADDR_HMCAD1520_INSEL34, 0x0200 << insel[3] | 0x0002 << insel[2]),
         ])?;
+        // reconfigure channel mux in the FPGA
+        self.modify_control(|val| {
+            val.remove(Control::ChannelMux0 | Control::ChannelMux1);
+            val.insert(chmux);
+        })?;
         // take data mover out of reset now that ADC clock is available
         self.enable_datamover()?;
         Ok(())
