@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use bitflags::bitflags;
 
 /// Thunderscope Control Register
@@ -31,6 +33,38 @@ bitflags! {
         const Rail3V3Enabled    = 1<<24;
         const ClockGenResetN    = 1<<25;
         const Rail5VEnabled     = 1<<26;
+    }
+}
+
+impl Control {
+    pub fn ch_termination(index: usize) -> Self {
+        match index {
+            0 => Control::Ch1Termination,
+            1 => Control::Ch2Termination,
+            2 => Control::Ch3Termination,
+            3 => Control::Ch4Termination,
+            _ => unreachable!()
+        }
+    }
+
+    pub fn ch_coupling(index: usize) -> Self {
+        match index {
+            0 => Control::Ch1Coupling,
+            1 => Control::Ch2Coupling,
+            2 => Control::Ch3Coupling,
+            3 => Control::Ch4Coupling,
+            _ => unreachable!()
+        }
+    }
+
+    pub fn ch_attenuator(index: usize) -> Self {
+        match index {
+            0 => Control::Ch1Attenuator,
+            1 => Control::Ch2Attenuator,
+            2 => Control::Ch3Attenuator,
+            3 => Control::Ch4Attenuator,
+            _ => unreachable!()
+        }
     }
 }
 

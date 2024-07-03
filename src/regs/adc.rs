@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub const ADDR_HMCAD1520_RESET: u8 = 0x00;
 pub const ADDR_HMCAD1520_POWER: u8 = 0x0F;
 pub const ADDR_HMCAD1520_INVERT: u8 = 0x24;

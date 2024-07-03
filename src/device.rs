@@ -4,7 +4,8 @@ use std::thread::sleep;
 use crate::Result;
 use crate::sys::Driver;
 use crate::regs::axi::{self, Control, FifoIsr, Status};
-use crate::regs::hmc;
+use crate::regs::adc;
+use crate::params::{ChannelParameters, CoarseAttenuation, Coupling, DeviceParameters, Termination};
 
 const SPI_BUS_ADC: u8 = 0;
 const SPI_BUS_PGA: [u8; 4] = [2, 3, 4, 5];
@@ -61,51 +62,105 @@ impl<D: Driver> Device<D> {
         // configure the ADC, but leave it powered down or it'll be very unhappy about its clock
         self.init_adc_registers(&[
             // reset ADC
-            (hmc::ADDR_HMCAD1520_RESET, 0x0001),
+            (adc::ADDR_HMCAD1520_RESET, 0x0001),
             // power down ADC
-            (hmc::ADDR_HMCAD1520_POWER, 0x0200),
+            (adc::ADDR_HMCAD1520_POWER, 0x0200),
             // invert channels
-            (hmc::ADDR_HMCAD1520_INVERT, 0x007F),
+            (adc::ADDR_HMCAD1520_INVERT, 0x007F),
             // adjust full scale value
-            (hmc::ADDR_HMCAD1520_FS_CNTRL, 0x0010),
-            // course gain on
-            (hmc::ADDR_HMCAD1520_GAIN_CFG, 0x0000),
-            // course gain 4-CH set
-            (hmc::ADDR_HMCAD1520_QUAD_GAIN, 0x9999),
-            // course gain 1-CH & 2-CH set
-            (hmc::ADDR_HMCAD1520_DUAL_GAIN, 0x0A99),
-            // select 8-bit mode for HMCAD1520s
-            (hmc::ADDR_HMCAD1520_RES_SEL, 0x0000),
-            // set LVDS phase to 0 deg & drive strength to RSDS
-            (hmc::ADDR_HMCAD1520_LVDS_PHASE, 0x0060),
-            (hmc::ADDR_HMCAD1520_LVDS_DRIVE, 0x0222),
-            // set ADC to ramp test mode
-            // (hmc::ADDR_HMCAD1520_LVDS_PATTERN, 1<<6),
+            (adc::ADDR_HMCAD1520_FS_CNTRL, 0x0020),
+            // enable coarse gain
+            (adc::ADDR_HMCAD1520_GAIN_CFG, 0x0000),
+            // set coarse gain for 4 channel mode
+            (adc::ADDR_HMCAD1520_QUAD_GAIN, 0x9999),
+            // set coarse gain for 1 and 2 channel modes
+            (adc::ADDR_HMCAD1520_DUAL_GAIN, 0x0A99),
+            // select 8-bit output (for HMCAD1520s)
+            (adc::ADDR_HMCAD1520_RES_SEL, 0x0000),
+            // set LVDS phase to 0 deg and drive strength to RSDS
+            (adc::ADDR_HMCAD1520_LVDS_PHASE, 0x0060),
+            (adc::ADDR_HMCAD1520_LVDS_DRIVE, 0x0222),
+            // configure output in ramp test mode
+            // (hmc::ADDR_HMCAD1520_LVDS_PATTERN, 0x0040),
         ])?;
-
-        // enable all ADC channels; this also enables the data mover
-        self.set_adc_channels([true, true, true, true])?;
 
         // enable the frontend
         self.modify_control(|val| val.insert(Control::Rail5VEnabled))?;
         sleep(Duration::from_millis(5));
 
-        // turn off aux output of PGAs as soon as rail is up to keep current consumption in check;
-        // the aux output on all PGAs together consumes almost 2W
-        for index in 0..4 {
-            self.set_pga(index)?;
-        }
-
-        self.modify_control(|val| {
-            val.insert(Control::Ch1Attenuator | Control::Ch2Attenuator |
-                Control::Ch3Attenuator | Control::Ch4Attenuator);
-        })?;
+        // configure to a known (default) state
+        // this also enables the data mover
+        self.configure(DeviceParameters::default())?;
 
         // done!
         Ok(())
     }
 
-    pub fn set_adc_channels(&mut self, enabled: [bool; 4]) -> Result<()> {
+    pub fn configure(&mut self, params: DeviceParameters) -> Result<()> {
+        log::info!("configure({:#?})", params);
+        // configure the PGAs first; this keeps current consumption in check for the initial
+        // `configure()` call from `startup()` by turning off the PGA aux outputs that (for all
+        // PGAs together) consume almost 2W
+        for (index, ch_params) in params.channels.iter().enumerate() {
+            let ch_params = ch_params.unwrap_or_default();
+            self.configure_pga(index, &ch_params)?;
+        }
+        // configure termination, coupling, and attenuator
+        for (index, ch_params) in params.channels.iter().enumerate() {
+            let ch_params = ch_params.unwrap_or_default();
+            self.modify_control(|val| {
+                match ch_params.termination {
+                    Termination::Ohm1M => val.remove(Control::ch_termination(index)),
+                    Termination::Ohm50 => val.insert(Control::ch_termination(index)),
+                }
+                match ch_params.coupling {
+                    Coupling::AC => val.remove(Control::ch_coupling(index)),
+                    Coupling::DC => val.insert(Control::ch_coupling(index)),
+                }
+                match ch_params.coarse_attenuation {
+                    CoarseAttenuation::X50 => val.remove(Control::ch_attenuator(index)),
+                    CoarseAttenuation::X1  => val.insert(Control::ch_attenuator(index)),
+                }
+            })?;
+        }
+        // configure voltage offset
+        for (index, ch_params) in params.channels.iter().enumerate() {
+            let ch_params = ch_params.unwrap_or_default();
+            self.configure_digipot_trimdac(index, &ch_params)?;
+        }
+        // configure the ADC input selector, clock divisor, channel mapping, and FPGA data mux
+        // this disables data mover first and (re-)enables it after
+        self.enable_adc_channels([
+            params.channels[0].is_some(),
+            params.channels[1].is_some(),
+            params.channels[2].is_some(),
+            params.channels[3].is_some(),
+        ])?;
+        Ok(())
+    }
+
+    fn configure_pga(&mut self, index: usize, params: &ChannelParameters) -> Result<()> {
+        self.write_pga_command(SPI_BUS_PGA[index],
+            (1 << 10) | // always turn off auxiliary output to save power
+            params.filtering.lmh6518_code() |
+            params.amplification.lmh6518_code() |
+            params.fine_attenuation.lmh6518_code()
+        )
+    }
+
+    fn configure_digipot_trimdac(&mut self, index: usize, params: &ChannelParameters) -> Result<()> {
+        const WIPER_ADDRESS: [u8; 4] = [0x6, 0x0, 0x1, 0x4];
+        self.write_digipot_input(WIPER_ADDRESS[index],
+            params.offset_magnitude.mcp4432t_503e_code())?;
+        self.write_trimdac_input(index as u8,
+            (1 << 15) | // always use Vref as reference
+            params.offset_value.mcp4728_code()
+        )?;
+        Ok(())
+    }
+
+    fn enable_adc_channels(&mut self, enabled: [bool; 4]) -> Result<()> {
+        log::debug!("enable_adc_channels({:?})", enabled);
         // compute number of enabled ADC channels and ADC clock divisor
         // channels CH1..CH4 on the faceplate are mapped to IN4..IN1 on the ADC, so this function
         // has to perform a really annoying permutation
@@ -144,14 +199,14 @@ impl<D: Driver> Device<D> {
         // reconfigure ADC
         self.init_adc_registers(&[
             // power down ADC
-            (hmc::ADDR_HMCAD1520_POWER, 0x0200),
+            (adc::ADDR_HMCAD1520_POWER, 0x0200),
             // configure clock divisor and channel count
-            (hmc::ADDR_HMCAD1520_CHNUM_CLKDIV, (clkdiv << 8) | chnum),
+            (adc::ADDR_HMCAD1520_CHNUM_CLKDIV, (clkdiv << 8) | chnum),
             // power up ADC
-            (hmc::ADDR_HMCAD1520_POWER, 0x0000),
+            (adc::ADDR_HMCAD1520_POWER, 0x0000),
             // configure channel mapping
-            (hmc::ADDR_HMCAD1520_INSEL12, 0x0200 << insel[1] | 0x0002 << insel[0]),
-            (hmc::ADDR_HMCAD1520_INSEL34, 0x0200 << insel[3] | 0x0002 << insel[2]),
+            (adc::ADDR_HMCAD1520_INSEL12, 0x0200 << insel[1] | 0x0002 << insel[0]),
+            (adc::ADDR_HMCAD1520_INSEL34, 0x0200 << insel[3] | 0x0002 << insel[2]),
         ])?;
         // reconfigure channel mux in the FPGA
         self.modify_control(|val| {
@@ -161,22 +216,6 @@ impl<D: Driver> Device<D> {
         // take data mover out of reset now that ADC clock is available
         self.enable_datamover()?;
         Ok(())
-    }
-
-    pub fn set_pga(&mut self, channel: usize) -> Result<()> {
-        // Hardcoded gain and anti-aliasing filter settings for now
-        // Will need some sort of structure to hold this info per channel
-        let aux_off: bool = true; // high disables aux output
-        let filter_val: u8 = 0x0; // 4 bits, 0 is full BW
-        let preamp_high_gain: bool = false;
-        let ladder_atten_val: u8 = 0x9; // 4 bits, 9 is POR value
-
-        self.write_pga_command(SPI_BUS_PGA[channel],
-            (aux_off as u16) << 10 |
-            (filter_val as u16) << 5 |
-            (preamp_high_gain as u16) << 4 |
-            (ladder_atten_val as u16) & 0x0f
-        )
     }
 
     pub fn read_data(&mut self) -> Result<()> {
@@ -211,30 +250,30 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn read_control(&mut self) -> Result<Control> {
+    fn read_control(&mut self) -> Result<Control> {
         let value = Control::from_bits_retain(self.read_user_u32(axi::ADDR_CONTROL)?);
         log::debug!("read_control() = {:?}", value);
         Ok(value)
     }
 
-    pub fn write_control(&mut self, value: Control) -> Result<()> {
+    fn write_control(&mut self, value: Control) -> Result<()> {
         log::debug!("write_control({:?})", value);
         Ok(self.write_user_u32(axi::ADDR_CONTROL, value.bits())?)
     }
 
-    pub fn modify_control<F: FnOnce(&mut Control)>(&mut self, f: F) -> Result<()> {
+    fn modify_control<F: FnOnce(&mut Control)>(&mut self, f: F) -> Result<()> {
         let mut value = self.read_control()?;
         f(&mut value);
         self.write_control(value)
     }
 
-    pub fn read_status(&mut self) -> Result<Status> {
+    fn read_status(&mut self) -> Result<Status> {
         let value = Status::from_bits_retain(self.read_user_u32(axi::ADDR_STATUS)?);
         log::debug!("read_status() = {:?}", value);
         Ok(value)
     }
 
-    pub fn disable_datamover(&mut self) -> Result<()> {
+    fn disable_datamover(&mut self) -> Result<()> {
         // halt the data mover
         self.modify_control(|val| val.remove(Control::DatamoverHaltN))?;
         // wait for data mover to halt
@@ -244,13 +283,13 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn enable_datamover(&mut self) -> Result<()> {
+    fn enable_datamover(&mut self) -> Result<()> {
         // take the acquisition system out of reset
         self.modify_control(|val| val.insert(Control::DatamoverHaltN | Control::FpgaAcqResetN))?;
         Ok(())
     }
 
-    pub fn write_fifo(&mut self, data: &[u8]) -> Result<()> {
+    fn write_fifo(&mut self, data: &[u8]) -> Result<()> {
         log::trace!("write_fifo({:02x?})", data);
         // enqueue data into the FIFO
         for &byte in data {
@@ -270,7 +309,7 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn write_i2c(&mut self, i2c_addr: u8, data: &[u8]) -> Result<()> {
+    fn write_i2c(&mut self, i2c_addr: u8, data: &[u8]) -> Result<()> {
         log::debug!("write_i2c({:#08b}, {:02x?})", i2c_addr, data);
         let mut packet = Vec::<u8>::new();
         packet.push(0xff);        // select I2C
@@ -285,7 +324,7 @@ impl<D: Driver> Device<D> {
 
     // bus 0 (0xfd): ADC
     // bus 2..5 (0xfb..0xf7): PGAn
-    pub fn write_spi(&mut self, spi_bus: u8, data: &[u8]) -> Result<()> {
+    fn write_spi(&mut self, spi_bus: u8, data: &[u8]) -> Result<()> {
         log::debug!("write_spi({:?}, {:02x?})", spi_bus, data);
         let mut packet = Vec::<u8>::new();
         packet.push(0xfd - spi_bus);
@@ -297,7 +336,7 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn write_pll_register(&mut self, reg_addr: u16, value: u8) -> Result<()> {
+    fn write_pll_register(&mut self, reg_addr: u16, value: u8) -> Result<()> {
         log::debug!("write_pll_register({:#06x}, {:#04x})", reg_addr, value);
         self.write_i2c(0b11101000, &[
             0x02,                  // register write
@@ -307,14 +346,14 @@ impl<D: Driver> Device<D> {
         ])
     }
 
-    pub fn init_pll_registers(&mut self, init_words: &[u32]) -> Result<()> {
+    fn init_pll_registers(&mut self, init_words: &[u32]) -> Result<()> {
         for &init_word in init_words {
             self.write_pll_register((init_word >> 8) as u16, init_word as u8)?;
         }
         Ok(())
     }
 
-    pub fn write_adc_register(&mut self, reg_addr: u8, value: u16) -> Result<()> {
+    fn write_adc_register(&mut self, reg_addr: u8, value: u16) -> Result<()> {
         log::debug!("write_adc_register({:#04x}, {:#06x})", reg_addr, value);
         self.write_spi(SPI_BUS_ADC, &[
             reg_addr,
@@ -323,19 +362,39 @@ impl<D: Driver> Device<D> {
         ])
     }
 
-    pub fn init_adc_registers(&mut self, init_pairs: &[(u8, u16)]) -> Result<()> {
+    fn init_adc_registers(&mut self, init_pairs: &[(u8, u16)]) -> Result<()> {
         for &(reg_addr, value) in init_pairs {
             self.write_adc_register(reg_addr, value)?;
         }
         Ok(())
     }
 
-    pub fn write_pga_command(&mut self, pga_bus: u8, command: u16) -> Result<()> {
+    fn write_pga_command(&mut self, pga_bus: u8, command: u16) -> Result<()> {
         log::debug!("write_pga_command({:?}, {:#06x})", pga_bus, command);
         self.write_spi(pga_bus, &[
             0x00, // write command word
             (command >> 8) as u8,
             (command >> 0) as u8,
         ])
-    }
+   }
+
+   fn write_digipot_input(&mut self, addr: u8, input: u16) -> Result<()> {
+        let command_data =
+            ((addr as u16) << 12) | // device address
+            (0b00 << 10) | // write
+            ((input & 0x3ff) << 0);
+        self.write_i2c(0b0101100, &[
+            (command_data >> 8) as u8,
+            (command_data >> 0) as u8,
+        ])
+   }
+
+   fn write_trimdac_input(&mut self, channel: u8, input: u16) -> Result<()> {
+        log::debug!("write_trimdac_input({:?}, {:#06x})", channel, input);
+        self.write_i2c(0b1100000, &[
+            0b01011_00_0 | ((channel & 0b11) << 1),
+            (input >> 8) as u8,
+            (input >> 0) as u8,
+        ])
+   }
 }

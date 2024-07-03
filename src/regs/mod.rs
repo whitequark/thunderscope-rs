@@ -1,2 +1,2 @@
 pub mod axi;
-pub mod hmc;
+pub mod adc;
