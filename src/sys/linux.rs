@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString};
-use std::io;
+use std::{fs, io};
 use libc::{c_int, c_void};
 use crate::{Result, Error};
 
@@ -64,16 +64,15 @@ pub struct ThunderscopeDriverImpl {
 impl ThunderscopeDriverImpl {
     pub fn new(device_path: &str) -> Result<ThunderscopeDriverImpl> {
         let control_path = device_path.to_owned() + "_control";
-        match std::fs::exists(control_path) {
-            Ok(true) => {
-                let user_path = CString::new(device_path.to_owned() + "_user").unwrap();
-                let d2h_path = CString::new(device_path.to_owned() + "_c2h_0").unwrap();
-                Ok(ThunderscopeDriverImpl {
-                    user_fd: FileDescriptor::open(user_path.as_ref()).map_err(Error::XdmaIo)?,
-                    c2h_fd: FileDescriptor::open(d2h_path.as_ref()).map_err(Error::XdmaIo)?,
-                })
-            }
-            _ => Err(Error::NotFound)
+        if fs::metadata(control_path).is_ok() {
+            let user_path = CString::new(device_path.to_owned() + "_user").unwrap();
+            let d2h_path = CString::new(device_path.to_owned() + "_c2h_0").unwrap();
+            Ok(ThunderscopeDriverImpl {
+                user_fd: FileDescriptor::open(user_path.as_ref()).map_err(Error::XdmaIo)?,
+                c2h_fd: FileDescriptor::open(d2h_path.as_ref()).map_err(Error::XdmaIo)?,
+            })
+        } else {
+            Err(Error::NotFound)
         }
     }
 }
