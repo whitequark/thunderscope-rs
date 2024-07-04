@@ -11,6 +11,7 @@ const vec2 quad[] = vec2[](
 );
 
 uniform vec2 resolution;
+uniform uint sample_count;
 
 in float adc_data;
 
@@ -23,7 +24,7 @@ void main() {
     adc_data_scaled = (1.0f + adc_data) / 2.0f;
 
     vec2 point_offset;
-    point_offset.x = 50.0f + 0.01f * float(gl_InstanceID);
+    point_offset.x = (resolution.x / float(sample_count)) * float(gl_InstanceID);
     point_offset.y = resolution.y * (0.5f + adc_data / 2.0f);
 
     relative_offset = quad[gl_VertexID];

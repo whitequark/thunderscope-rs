@@ -18,6 +18,8 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 
 use glow::{Context as GlowContext, HasContext};
 
+const SAMPLE_COUNT: usize = 2000;
+
 pub struct Renderer {
     pub program: <glow::Context as HasContext>::Program,
     pub vertex_array: <glow::Context as HasContext>::VertexArray,
@@ -60,7 +62,7 @@ impl Renderer {
                 data_array:
                     gl.create_buffer().expect("failed to create buffer"),
             };
-            renderer.update(gl, &[0u8; 200000]);
+            renderer.update(gl, &[0u8; SAMPLE_COUNT]);
             renderer
         }
     }
@@ -76,6 +78,7 @@ impl Renderer {
     pub fn render(&self, gl: &glow::Context) {
         unsafe {
             let channel_color_loc = gl.get_uniform_location(self.program, "channel_color");
+            let sample_count_loc = gl.get_uniform_location(self.program, "sample_count");
             let adc_data_loc = gl.get_attrib_location(self.program, "adc_data")
                 .expect("failed to retrieve location for `adc_data`");
 
@@ -87,12 +90,13 @@ impl Renderer {
 
             gl.use_program(Some(self.program));
             gl.uniform_3_f32(channel_color_loc.as_ref(), 1.0, 1.0, 0.0);
+            gl.uniform_1_u32(sample_count_loc.as_ref(), SAMPLE_COUNT as u32);
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.data_array));
             gl.enable_vertex_attrib_array(adc_data_loc);
             gl.vertex_attrib_pointer_f32(adc_data_loc, 1, glow::BYTE, true, 1, 0);
             gl.vertex_attrib_divisor(adc_data_loc, 1);
-            gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, 200000);
+            gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, SAMPLE_COUNT as i32);
             gl.disable_vertex_attrib_array(adc_data_loc);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
         }
@@ -207,7 +211,7 @@ fn main() {
     let writer_capture_data = Arc::clone(&reader_capture_data);
     // open and configure the instrument
     let _acquisition_thread = thread::spawn(move || {
-        writer_capture_data.lock().unwrap().resize(200000, 0);
+        writer_capture_data.lock().unwrap().resize(SAMPLE_COUNT, 0);
         thunderscope::Device::with(|device| {
             device.startup()?;
             device.configure(&thunderscope::DeviceParameters::derive(
