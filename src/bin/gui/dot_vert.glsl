@@ -24,7 +24,7 @@ void main() {
     adc_data_scaled = (1.0f + adc_data) / 2.0f;
 
     vec2 point_offset;
-    point_offset.x = (resolution.x / float(sample_count)) * float(gl_InstanceID);
+    point_offset.x = (float(resolution.x) / float(sample_count)) * float(gl_InstanceID);
     point_offset.y = resolution.y * (0.5f + adc_data / 2.0f);
 
     relative_offset = quad[gl_VertexID];
