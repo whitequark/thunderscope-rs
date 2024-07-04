@@ -7,7 +7,8 @@ use crate::{Error, Result};
 use crate::sys::Driver;
 use crate::regs::axi::{self, Control, FifoIsr, Status};
 use crate::regs::adc;
-use crate::params::{ChannelParameters, CoarseAttenuation, Coupling, DeviceParameters, Termination};
+use crate::config::{Coupling, Termination};
+use crate::params::{ChannelParameters, CoarseAttenuation, DeviceParameters};
 
 const SPI_BUS_ADC: u8 = 0;
 const SPI_BUS_PGA: [u8; 4] = [2, 3, 4, 5];
@@ -23,6 +24,15 @@ impl Device<crate::sys::imp::ThunderscopeDriverImpl> {
         #[cfg(any(target_os = "linux"))]
         let driver = crate::sys::imp::ThunderscopeDriverImpl::new("/dev/xdma0")?;
         Ok(Device { driver })
+    }
+
+    pub fn with<F, R>(f: F) -> Result<R>
+            where F: FnOnce(&mut Self) -> Result<R> {
+        let mut device = Self::new()?;
+        device.startup()?;
+        let result = f(&mut device);
+        device.shutdown()?;
+        result
     }
 }
 
@@ -383,8 +393,8 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn teardown(&mut self) -> Result<()> {
-        log::info!("teardown()");
+    pub fn shutdown(&mut self) -> Result<()> {
+        log::info!("shutdown()");
         // disable the data mover first and let it stop, since it runs on ADC clock
         self.disable_datamover()?;
         // power down the frontend 5V0 and board 3V3
@@ -433,14 +443,14 @@ impl<D: Driver> Device<D> {
                 log::debug!("read_data(): at page {:04X}: +{:04X}",
                     curr_writer, curr_writer - prev_writer);
                 write_to_buffer(&mut buffer, (curr_writer - prev_writer) << PAGE_BITS, |slice|
-                    self.driver.read_d2h(prev_writer << PAGE_BITS, slice))?;
+                    self.driver.read_dma(prev_writer << PAGE_BITS, slice))?;
             } else { // wraparound
                 log::debug!("read_data(): at page {:04X}: +{:04X}+{:04X}",
                     curr_writer, MEMORY_PAGES - prev_writer, curr_writer);
                 write_to_buffer(&mut buffer, (MEMORY_PAGES - prev_writer) << PAGE_BITS, |slice|
-                    self.driver.read_d2h(prev_writer << PAGE_BITS, slice))?;
+                    self.driver.read_dma(prev_writer << PAGE_BITS, slice))?;
                 write_to_buffer(&mut buffer, curr_writer << PAGE_BITS, |slice|
-                    self.driver.read_d2h(0, slice))?;
+                    self.driver.read_dma(0, slice))?;
             }
             prev_writer = curr_writer;
             // run the processing callback

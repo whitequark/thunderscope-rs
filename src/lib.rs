@@ -1,25 +1,27 @@
 mod sys;
 mod regs;
+mod config;
 mod params;
 mod device;
 
 #[derive(Debug)]
 pub enum Error {
-    Io(std::io::Error),
+    NotFound,
+    XdmaIo(std::io::Error),
     Overflow { required: usize, available: usize },
-}
-
-impl From<std::io::Error> for Error {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
 
-pub use params::{
+pub use config::{
     Termination,
     Coupling,
+    Bandwidth,
+    ChannelConfiguration,
+    DeviceConfiguration,
+};
+
+pub use params::{
     CoarseAttenuation,
     Amplification,
     FineAttenuation,
@@ -28,5 +30,8 @@ pub use params::{
     OffsetValue,
     ChannelParameters,
     DeviceParameters,
+    ChannelCalibration,
+    DeviceCalibration,
 };
-pub use device::Device;
+
+pub type Device = device::Device<crate::sys::imp::ThunderscopeDriverImpl>;

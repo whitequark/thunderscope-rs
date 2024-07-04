@@ -1,20 +1,11 @@
+//! Low-level parameters of the device that map 1:1 to values written into registers of
+//! analog frontend components.
+
 #![allow(dead_code)]
 
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Termination {
-    Ohm50,
-    #[default]
-    Ohm1M,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Coupling {
-    #[default]
-    DC,
-    AC
-}
+use crate::{config::{Bandwidth, Coupling, DeviceConfiguration, Termination}, ChannelConfiguration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CoarseAttenuation {
@@ -169,6 +160,43 @@ impl Default for DeviceParameters {
     fn default() -> Self {
         DeviceParameters {
             channels: [Some(ChannelParameters::default()); 4]
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChannelCalibration {
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeviceCalibration {
+    pub channels: [ChannelCalibration; 4],
+}
+
+impl DeviceParameters {
+    pub fn derive(calibration: &DeviceCalibration, configuration: &DeviceConfiguration) -> Self {
+        fn derive_channel(_calibration: &ChannelCalibration,
+                configuration: &ChannelConfiguration) -> ChannelParameters {
+            ChannelParameters {
+                termination: configuration.termination,
+                coupling: configuration.coupling,
+                coarse_attenuation: CoarseAttenuation::X1, // FIXME
+                amplification: Amplification::dB10, // FIXME
+                fine_attenuation: FineAttenuation::dB20, // FIXME
+                filtering: match configuration.bandwidth {
+                    Bandwidth::MHz100 => Filtering::MHz100,
+                    Bandwidth::MHz200 => Filtering::MHz200,
+                    Bandwidth::MHz350 => Filtering::MHz350,
+                },
+                offset_magnitude: Default::default(), // FIXME
+                offset_value: Default::default(), // FIXME
+            }
+        }
+
+        DeviceParameters {
+            channels: std::array::from_fn(|index|
+                configuration.channels[index].map(|channel|
+                    derive_channel(&calibration.channels[index], &channel)))
         }
     }
 }
