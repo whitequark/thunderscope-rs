@@ -53,13 +53,15 @@ impl Renderer {
                 gl.delete_shader(shader);
             }
 
-            Self {
+            let renderer = Self {
                 program,
                 vertex_array:
                     gl.create_vertex_array().expect("failed to create vertex array"),
                 data_array:
                     gl.create_buffer().expect("failed to create buffer"),
-            }
+            };
+            renderer.update(gl, &[0u8; 200000]);
+            renderer
         }
     }
 
@@ -91,6 +93,8 @@ impl Renderer {
             gl.vertex_attrib_pointer_f32(adc_data_loc, 1, glow::BYTE, true, 1, 0);
             gl.vertex_attrib_divisor(adc_data_loc, 1);
             gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, 200000);
+            gl.disable_vertex_attrib_array(adc_data_loc);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
         }
     }
 
@@ -203,7 +207,7 @@ fn main() {
     let writer_capture_data = Arc::clone(&reader_capture_data);
     // open and configure the instrument
     let _acquisition_thread = thread::spawn(move || {
-        { writer_capture_data.lock().unwrap().resize(200000, 0); }
+        writer_capture_data.lock().unwrap().resize(200000, 0);
         thunderscope::Device::with(|device| {
             device.startup()?;
             device.configure(&thunderscope::DeviceParameters::derive(

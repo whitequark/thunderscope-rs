@@ -27,3 +27,6 @@ path = "src/bin/test.rs"
 name = "thunderscope-gui"
 path = "src/bin/gui/main.rs"
 required-features = ["gui"]
+
+[profile.dev]
+opt-level = 2
