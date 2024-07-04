@@ -15,7 +15,18 @@ fn main() -> thunderscope::Result<()> {
         ..Default::default()
     });
     device.configure(&DeviceParameters { channels: [ch_params, None, None, None] })?;
-    device.read_data()?;
+    device.read_data(|buffer| {
+        let samples = buffer.read().unwrap();
+        const SAVE_SAMPLES: usize = 512;
+        if samples.len() >= SAVE_SAMPLES {
+            println!("got {} samples, first 32: {:02X?}", samples.len(), &samples[..32]);
+            std::fs::write("test.data", &samples[..SAVE_SAMPLES]).unwrap();
+            println!("run `python3 ./doc/plot_1ch.py test.data`");
+            Err(())
+        } else {
+            Ok(())
+        }
+    })?;
     device.teardown()?;
     Ok(())
 }

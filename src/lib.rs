@@ -6,6 +6,7 @@ mod device;
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
+    Overflow { required: usize, available: usize },
 }
 
 impl From<std::io::Error> for Error {

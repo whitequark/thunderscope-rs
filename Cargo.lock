@@ -61,6 +61,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bipbuffer"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e33e34adc0a815a65c7ef9a443c5a1265534302d02ffc89486cad78e9353b31"
+
+[[package]]
 name = "bitflags"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -158,6 +164,7 @@ checksum = "7a66a03ae7c801facd77a29370b4faec201768915ac14a721ba36f20bc9c209b"
 name = "thunderscope"
 version = "0.1.0"
 dependencies = [
+ "bipbuffer",
  "bitflags",
  "env_logger",
  "libc",

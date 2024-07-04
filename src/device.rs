@@ -1,7 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::thread;
 
-use crate::Result;
+use bipbuffer::BipBuffer;
+
+use crate::{Error, Result};
 use crate::sys::Driver;
 use crate::regs::axi::{self, Control, FifoIsr, Status};
 use crate::regs::adc;
@@ -59,7 +61,7 @@ impl<D: Driver> Device<D> {
 
     fn read_status(&mut self) -> Result<Status> {
         let value = Status::from_bits_retain(self.read_user_u32(axi::ADDR_STATUS)?);
-        log::debug!("read_status() = {:?}", value);
+        log::trace!("read_status() = {:?}", value);
         Ok(value)
     }
 
@@ -390,54 +392,61 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn read_data(&mut self) -> Result<()> {
+    pub fn read_data<F, E>(&mut self, mut process_data: F) -> Result<E>
+            where F: FnMut(&mut BipBuffer<u8>) -> std::result::Result<(), E> {
         const PAGE_BITS: usize = 12; // 4 Ki
         const MEMORY_PAGES: usize = 1 << 16; // 64 Ki x (1 << PAGE_BITS) = 256 Mi
-        const LAG_THRESHOLD: Duration = Duration::from_millis(50);
 
-        let mut buffer = Vec::new();
-        buffer.resize(MEMORY_PAGES << PAGE_BITS, 0);
+        // the size of the buffer determines tolerance to timing jitter. a 128 MiB buffer
+        // at 1 GSa/s corresponds to ~135 ms of lag, which seems sufficient for most uses.
+        let mut buffer = bipbuffer::BipBuffer::<u8>::new((MEMORY_PAGES / 2) << PAGE_BITS);
 
-        let mut accumulated_lag = Duration::ZERO;
-        let mut prev_time_delta = Duration::ZERO;
+        fn write_to_buffer<F>(buffer: &mut BipBuffer<u8>, length: usize, f: F) -> Result<()>
+                where F: FnOnce(&mut [u8]) -> Result<()> {
+            match buffer.reserve(length) {
+                // there was enough space in the buffer
+                Ok(slice) if slice.len() == length => {
+                    f(slice)?;
+                    Ok(buffer.commit(length))
+                }
+                // there wasn't; jitter was too high for the buffer size and/or callback latency
+                Ok(_) | Err(_) => {
+                    log::error!("Buffer overflow, system may be too slow or overloaded");
+                    Err(Error::Overflow { required: length, available: buffer.reserved_len() })
+                }
+            }
+        }
+
         let mut prev_writer = self.read_status()?.pages_moved();
         loop {
-            let before_write = Instant::now();
-            // read the data, taking care of the circular buffer looping over
+            // check if there is an error condition set
+            // these should never appear so long as the FPGA is functioning correctly
+            let status = self.read_status()?;
+            if status.intersects(Status::FifoOverflow | Status::DatamoverError) {
+                log::error!("Data mover failure, power cycle the device");
+                panic!("Data mover failure: {:?} (overflow by {} cycles)",
+                    status, status.overflow_cycles());
+            }
+            // read the data into the buffer, handling wraparound of the writer
             let curr_writer = self.read_status()?.pages_moved();
-            if curr_writer >= prev_writer { // no overflow
-                log::debug!("read_data(): at page {:04X} (+{:04X})",
+            if curr_writer >= prev_writer { // no wraparound
+                log::debug!("read_data(): at page {:04X}: +{:04X}",
                     curr_writer, curr_writer - prev_writer);
-                self.driver.read_d2h(prev_writer << PAGE_BITS,
-                    &mut buffer[prev_writer << PAGE_BITS..curr_writer << PAGE_BITS])?;
-            } else { // overflow
-                log::debug!("read_data(): at page {:04X} (+{:04X}+{:04X})",
+                write_to_buffer(&mut buffer, (curr_writer - prev_writer) << PAGE_BITS, |slice|
+                    self.driver.read_d2h(prev_writer << PAGE_BITS, slice))?;
+            } else { // wraparound
+                log::debug!("read_data(): at page {:04X}: +{:04X}+{:04X}",
                     curr_writer, MEMORY_PAGES - prev_writer, curr_writer);
-                self.driver.read_d2h(prev_writer << PAGE_BITS,
-                    &mut buffer[prev_writer << PAGE_BITS..])?;
-                self.driver.read_d2h(0,
-                    &mut buffer[..curr_writer << PAGE_BITS])?;
+                write_to_buffer(&mut buffer, (MEMORY_PAGES - prev_writer) << PAGE_BITS, |slice|
+                    self.driver.read_d2h(prev_writer << PAGE_BITS, slice))?;
+                write_to_buffer(&mut buffer, curr_writer << PAGE_BITS, |slice|
+                    self.driver.read_d2h(0, slice))?;
             }
             prev_writer = curr_writer;
-            // guard against systems that are not performant enough while avoiding false positives
-            // due to jitter.
-            // the algorithm works like this: on average, each read should take roughly the same
-            // time to execute _if_ the reader is following the writer. sometimes it won't, and
-            // that will cause a lag spike, but if it was transient, the next read will catch up to
-            // the writer, and the lag spike will average out. however, if this system is really
-            // too slow, then the accumulated lag will grow unbounded. error out above some
-            // arbitrary threshold, which is selected to be higher than any amount of time a single
-            // read could reasonably take.
-            let curr_time_delta = before_write.elapsed();
-            accumulated_lag += curr_time_delta;
-            accumulated_lag -= prev_time_delta;
-            log::trace!("read_data(): accumulated lag: {:?}", accumulated_lag);
-            if accumulated_lag > LAG_THRESHOLD {
-                log::error!("read_data(): accumulated lag over threshold! ({:?} > {:?})",
-                    accumulated_lag, LAG_THRESHOLD);
+            // run the processing callback
+            if let Err(exit) = process_data(&mut buffer) {
+                return Ok(exit)
             }
-            prev_time_delta = curr_time_delta;
         }
-        Ok(())
     }
 }
