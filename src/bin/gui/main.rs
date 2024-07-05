@@ -1,3 +1,4 @@
+use std::cmp::{max, min};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,12 +19,22 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 
 use glow::{Context as GlowContext, HasContext};
 
-const SAMPLE_COUNT: usize = 200000;
+#[derive(Debug, Clone, Copy)]
+pub enum TriggerEdge {
+    Rising,
+    Falling,
+    Both
+}
 
-pub struct Renderer {
-    pub program: <glow::Context as HasContext>::Program,
-    pub vertex_array: <glow::Context as HasContext>::VertexArray,
-    pub data_array: <glow::Context as HasContext>::Buffer,
+const TRIGGER_EDGE: TriggerEdge = TriggerEdge::Rising;
+const TRIGGER_LEVEL: i8 = 50;
+const SAMPLE_COUNT: usize = 200_000;
+const HOLDOFF_DURATION: usize = 0; // on top of `SAMPLE_COUNT``
+
+struct Renderer {
+    program: <glow::Context as HasContext>::Program,
+    vertex_array: <glow::Context as HasContext>::VertexArray,
+    data_array: <glow::Context as HasContext>::Buffer,
 }
 
 impl Renderer {
@@ -167,8 +178,114 @@ impl ApplicationHandler for Application {
     }
 }
 
+fn sampler(capture_data: Arc<Mutex<Vec<u8>>>) -> thunderscope::Result<()> {
+    thunderscope::Device::with(|device| {
+        device.startup()?;
+        device.configure(&thunderscope::DeviceParameters::derive(
+            &thunderscope::DeviceCalibration::default(),
+            &thunderscope::DeviceConfiguration {
+                channels: [Some(thunderscope::ChannelConfiguration {
+                    ..Default::default()
+                }), None, None, None]
+            }))?;
+
+        #[derive(Debug, Clone, Copy, Default)]
+        enum TriggerMemory {
+            #[default]
+            Below,
+            Above
+        }
+
+        #[derive(Debug, Clone, Copy, Default)]
+        enum TriggerState {
+            #[default]
+            Scanning,
+            Capturing { offset: usize },
+            Holdoff { elapsed: usize },
+        }
+
+        let trigger_edge = TRIGGER_EDGE;
+        let (trigger_above, trigger_below) = (TRIGGER_LEVEL + 2, TRIGGER_LEVEL - 2);
+
+        let mut trigger_memory = TriggerMemory::default();
+        let mut trigger_state = TriggerState::default();
+        device.read_data(|buffer| {
+            log::debug!("read_data got {} committed samples", buffer.committed_len());
+            while buffer.committed_len() > 0 {
+                let samples = buffer.read().unwrap();
+                let processed;
+                (processed, trigger_state) = match trigger_state {
+                    TriggerState::Scanning => {
+                        let mut trigger_at = None;
+                        for (index, &sample) in samples.iter().enumerate() {
+                            let sample = sample as i8;
+                            match trigger_memory {
+                                TriggerMemory::Below if sample > trigger_above => {
+                                    trigger_memory = TriggerMemory::Above;
+                                    if let TriggerEdge::Rising | TriggerEdge::Both = trigger_edge {
+                                        trigger_at = Some(index);
+                                        break
+                                    }
+                                }
+                                TriggerMemory::Above if sample < trigger_below => {
+                                    trigger_memory = TriggerMemory::Below;
+                                    if let TriggerEdge::Falling | TriggerEdge::Both = trigger_edge {
+                                        trigger_at = Some(index);
+                                        break
+                                    }
+                                }
+                                _ => ()
+                            }
+                        }
+                        match trigger_at {
+                            None => {
+                                // no trigger, decommit all and continue scanning
+                                (samples.len(), trigger_state)
+                            }
+                            Some(index) => {
+                                // triggered, decommit up to trigger and capture
+                                (index, TriggerState::Capturing { offset: 0 })
+                            }
+                        }
+                    }
+                    TriggerState::Capturing { offset } => {
+                        let remaining = max(samples.len(), SAMPLE_COUNT - offset);
+                        if let Ok(mut buffer) = capture_data.try_lock() {
+                            let available = min(samples.len(), SAMPLE_COUNT - offset);
+                            buffer[offset..offset + available].copy_from_slice(&samples[..available])
+                        } // never block waiting for GUI
+                        if remaining <= samples.len() {
+                            if HOLDOFF_DURATION > 0 {
+                                (remaining, TriggerState::Holdoff { elapsed: 0 })
+                            } else {
+                                (remaining, TriggerState::Scanning)
+                            }
+                        } else {
+                            let offset = offset + samples.len();
+                            (samples.len(), TriggerState::Capturing { offset })
+                        }
+                    },
+                    TriggerState::Holdoff { elapsed } => {
+                        let remaining = max(samples.len(), HOLDOFF_DURATION - elapsed);
+                        if remaining <= samples.len() {
+                            (remaining, TriggerState::Scanning)
+                        } else {
+                            let elapsed = elapsed + samples.len();
+                            (samples.len(), TriggerState::Holdoff { elapsed })
+                        }
+                    }
+                };
+                buffer.decommit(processed);
+            };
+            Ok(())
+        })?;
+        Ok(())
+    })
+}
+
 fn main() {
     env_logger::Builder::from_default_env()
+        .format_timestamp_micros()
         .filter_level(log::LevelFilter::Info)
         .init();
     // create a window
@@ -208,43 +325,21 @@ fn main() {
         GlowContext::from_loader_function_cstr(|func|
             gl_config.display().get_proc_address(func).cast())
     };
-    // create the shared data buffer
-    let reader_capture_data = Arc::new(Mutex::new(Vec::new()));
-    let writer_capture_data = Arc::clone(&reader_capture_data);
-    // open and configure the instrument
-    let _acquisition_thread = thread::spawn(move || {
-        writer_capture_data.lock().unwrap().resize(SAMPLE_COUNT, 0);
-        thunderscope::Device::with(|device| {
-            device.startup()?;
-            device.configure(&thunderscope::DeviceParameters::derive(
-                &thunderscope::DeviceCalibration::default(),
-                &thunderscope::DeviceConfiguration {
-                    channels: [Some(thunderscope::ChannelConfiguration::default()), None, None, None]
-                }))?;
-            device.read_data(|buffer| {
-                let processed = {
-                    let samples = buffer.read().unwrap_or(&mut []);
-                    match writer_capture_data.try_lock() {
-                        Ok(mut buffer) if buffer.len() <= samples.len() => {
-                            let samples2 = &samples[..buffer.len()];
-                            buffer.copy_from_slice(samples2);
-                            samples2.len() // all of them
-                        }
-                        _ => 0
-                    };
-                    samples.len()
-                };
-                buffer.decommit(processed);
-                Ok(())
-            })?;
-            Ok(())
-        }).expect("failed to open instrument");
-    });
+    // start the acquisition
+    let mut capture_data = Vec::new();
+    capture_data.resize(SAMPLE_COUNT, 0);
+    let capture_data = Arc::new(Mutex::new(capture_data));
+    let _acquisition_thread = {
+        let capture_data = capture_data.clone();
+        thread::spawn(move ||
+            sampler(Arc::clone(&capture_data))
+                .expect("failed to acquire sample data"));
+    };
     //
     // create the application
     let renderer = Renderer::new(&glow_context);
     let mut application = Application {
-        capture_data: reader_capture_data,
+        capture_data,
         gl_context,
         gl_surface,
         glow_context,
