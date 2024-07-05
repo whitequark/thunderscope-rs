@@ -18,7 +18,7 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 
 use glow::{Context as GlowContext, HasContext};
 
-const SAMPLE_COUNT: usize = 2000;
+const SAMPLE_COUNT: usize = 200000;
 
 pub struct Renderer {
     pub program: <glow::Context as HasContext>::Program,
@@ -168,7 +168,9 @@ impl ApplicationHandler for Application {
 }
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     // create a window
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let attributes = Window::default_attributes()

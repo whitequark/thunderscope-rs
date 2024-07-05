@@ -1,7 +1,5 @@
 #version 300 es
-precision mediump float;
-
-#define PI 3.1415926
+precision highp float;
 
 const vec2 quad[] = vec2[](
     vec2(-1.0f, 1.0f),
