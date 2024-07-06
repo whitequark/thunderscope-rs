@@ -2,6 +2,16 @@
 name = "thunderscope"
 version = "0.1.0"
 edition = "2021"
+default-run = "thunderscope-gui"
+
+[[bin]]
+name = "thunderscope-gui"
+path = "src/bin/gui/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "thunderscope-test"
+path = "src/bin/test.rs"
 
 [dependencies]
 log = "0.4"
@@ -20,15 +30,6 @@ glow = { version = "0.13", optional = true }
 [features]
 default = ["gui"]
 gui = ["dep:winit", "dep:glutin", "dep:glutin-winit", "dep:glow"]
-
-[[bin]]
-name = "thunderscope-test"
-path = "src/bin/test.rs"
-
-[[bin]]
-name = "thunderscope-gui"
-path = "src/bin/gui/main.rs"
-required-features = ["gui"]
 
 [profile.dev]
 opt-level = 2

@@ -12,7 +12,8 @@ use winit::application::ApplicationHandler;
 use glutin_winit::DisplayBuilder;
 
 use glutin::config::ConfigTemplateBuilder;
-use glutin::context::{ContextApi, ContextAttributesBuilder, NotCurrentGlContext, PossiblyCurrentContext, Version};
+use glutin::context::{Version, ContextApi, ContextAttributesBuilder};
+use glutin::context::{NotCurrentGlContext, PossiblyCurrentContext};
 use glutin::surface::{GlSurface, Surface, SurfaceAttributesBuilder, WindowSurface};
 use glutin::display::{GetGlDisplay, GlDisplay};
 
@@ -20,9 +21,10 @@ use glow::{Context as GlowContext, HasContext};
 
 use thunderscope::EdgeFilter;
 
-const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Both;
+const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
 const TRIGGER_LEVEL: i8 = 50;
-const SAMPLE_COUNT: usize = 150_000;
+const SAMPLE_COUNT: usize = 120_000;
+const RENDER_LINES: bool = true;
 
 struct Renderer {
     program: <glow::Context as HasContext>::Program,
@@ -33,8 +35,8 @@ struct Renderer {
 impl Renderer {
     pub fn new(gl: &glow::Context) -> Self {
         let shaders = [
-            (glow::VERTEX_SHADER,   include_str!("dot_vert.glsl")),
-            (glow::FRAGMENT_SHADER, include_str!("dot_frag.glsl")),
+            (glow::VERTEX_SHADER,   include_str!("wave_vert.glsl")),
+            (glow::FRAGMENT_SHADER, include_str!("wave_frag.glsl")),
         ];
 
         unsafe {
@@ -84,8 +86,11 @@ impl Renderer {
         unsafe {
             let channel_color_loc = gl.get_uniform_location(self.program, "channel_color");
             let sample_count_loc = gl.get_uniform_location(self.program, "sample_count");
-            let adc_data_loc = gl.get_attrib_location(self.program, "adc_data")
-                .expect("failed to retrieve location for `adc_data`");
+            let draw_lines_loc = gl.get_uniform_location(self.program, "draw_lines");
+            let sample_value0_loc = gl.get_attrib_location(self.program, "sample_value0")
+                .expect("could not retrieve attribute location");
+            let sample_value1_loc = gl.get_attrib_location(self.program, "sample_value1")
+                .expect("could not retrieve attribute location");
 
             gl.clear_color(0.1, 0.0, 0.1, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -95,14 +100,19 @@ impl Renderer {
 
             gl.use_program(Some(self.program));
             gl.uniform_3_f32(channel_color_loc.as_ref(), 1.0, 1.0, 0.0);
-            gl.uniform_1_u32(sample_count_loc.as_ref(), SAMPLE_COUNT as u32);
+            gl.uniform_1_i32(sample_count_loc.as_ref(), SAMPLE_COUNT as i32);
+            gl.uniform_1_u32(draw_lines_loc.as_ref(), RENDER_LINES as u32);
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.data_array));
-            gl.enable_vertex_attrib_array(adc_data_loc);
-            gl.vertex_attrib_pointer_f32(adc_data_loc, 1, glow::BYTE, true, 1, 0);
-            gl.vertex_attrib_divisor(adc_data_loc, 1);
+            gl.enable_vertex_attrib_array(sample_value0_loc);
+            gl.vertex_attrib_pointer_f32(sample_value0_loc, 1, glow::BYTE, true, 1, 0);
+            gl.vertex_attrib_divisor(sample_value0_loc, 1);
+            gl.enable_vertex_attrib_array(sample_value1_loc);
+            gl.vertex_attrib_pointer_f32(sample_value1_loc, 1, glow::BYTE, true, 1, 1);
+            gl.vertex_attrib_divisor(sample_value1_loc, 1);
             gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, SAMPLE_COUNT as i32);
-            gl.disable_vertex_attrib_array(adc_data_loc);
+            gl.disable_vertex_attrib_array(sample_value0_loc);
+            gl.disable_vertex_attrib_array(sample_value1_loc);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
         }
     }
