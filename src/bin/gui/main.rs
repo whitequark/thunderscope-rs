@@ -20,9 +20,9 @@ use glow::{Context as GlowContext, HasContext};
 
 use thunderscope::EdgeFilter;
 
-const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
+const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Both;
 const TRIGGER_LEVEL: i8 = 50;
-const SAMPLE_COUNT: usize = 2_000;
+const SAMPLE_COUNT: usize = 150_000;
 
 struct Renderer {
     program: <glow::Context as HasContext>::Program,
@@ -219,6 +219,8 @@ fn sampler(capture_data: Arc<Mutex<Vec<i8>>>) -> thunderscope::Result<()> {
                 }
                 cursor += SAMPLE_COUNT;
                 available -= SAMPLE_COUNT;
+                // reset trigger
+                trigger.reset();
             }
         }
     })

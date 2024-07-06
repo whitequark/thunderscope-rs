@@ -57,6 +57,15 @@ impl Trigger {
         }
     }
 
+    /// Reset the trigger
+    ///
+    /// After this method is called, the next sample will not cause an edge to be detected,
+    /// regardless of what the value of the sample is, as if the trigger was re-created with
+    /// the same parameters.
+    pub fn reset(&mut self) {
+        self.state = State::Fresh
+    }
+
     /// Scan incoming data for edges.
     ///
     /// The return value indicates whether processing has ended because an edge has been detected,
