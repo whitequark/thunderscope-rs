@@ -77,6 +77,10 @@ impl Trigger {
     /// of implementation dependent size (currently 16) are left unprocessed.
     pub fn scan(&mut self, samples: &mut &[i8], filter: EdgeFilter) -> Option<Edge> {
         // Dispatch to the most efficient implementation.
+        // Note that this dynamic dispatch is not quite as efficient as building with for example
+        // `RUSTFLAGS="-C target-cpu=native"` because the `wide` crate will only use 128-bit
+        // registers if AVX2 wasn't detected at compile time, but the difference is quite small.
+        // https://github.com/Lokathor/wide/blob/d94cbeadceacb0d9ebe5f18caedf933e0d4398ad/src/i8x32_.rs#L3-L13
         if is_x86_feature_detected!("avx2") {
             // SAFETY: The AVX2 function is called only if AVX2 is available, checked above.
             unsafe { self.scan_avx2(samples, filter) }
@@ -109,6 +113,7 @@ macro_rules! scan_impl {
             use wide::{$simd_ty, CmpGt, CmpLt};
             const LANES: usize = wide::$simd_ty::LANES as usize;
 
+            #[inline] // improves debug builds and makes assembly listings useful
             fn scan_for<P: Fn($simd_ty) -> $simd_ty>(samples: &mut &[i8], predicate: P) -> bool {
                 let mut found = false;
                 let mut offset = 0;
@@ -174,7 +179,7 @@ macro_rules! scan_impl {
 
 impl Trigger {
     scan_impl! { <i8x16> fn scan_generic }
-    scan_impl! { <i8x32> #[target_feature(enable = "avx")]  unsafe fn scan_avx }
+    scan_impl! { <i8x32> #[target_feature(enable = "avx")]  unsafe fn scan_avx  }
     scan_impl! { <i8x32> #[target_feature(enable = "avx2")] unsafe fn scan_avx2 }
 }
 
