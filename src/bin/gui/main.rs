@@ -292,6 +292,9 @@ fn main() {
     //
     // create the application
     let renderer = Renderer::new(&glow_context);
+    // let data = Vec::from_iter((0..SAMPLE_COUNT).map(|n|
+    //     ((n as f32 * std::f32::consts::PI / 3.5).sin() * 100.0) as i8));
+    // renderer.update(&glow_context, data.as_ref());
     let mut application = Application {
         capture_data,
         gl_context,

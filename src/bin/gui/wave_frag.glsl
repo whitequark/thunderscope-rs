@@ -13,18 +13,17 @@ void main() {
     float alpha = 1.0f;
     if (draw_lines) {
         if (prim_offset.x < 0.0f) { // endcap
-            alpha = 0.5f;
             vec2 norm_offset = vec2(
                 prim_offset.x / prim_size.y,
                 prim_offset.y / prim_size.y
             );
-            alpha = 1.0f - dot(norm_offset, norm_offset) * 2.0f;
+            alpha = (1.0f - dot(norm_offset, norm_offset)) * 0.6f;
         } else if (prim_offset.x > prim_size.x) { // endcap
             vec2 norm_offset = vec2(
                 (prim_offset.x - prim_size.x) / prim_size.y,
                 prim_offset.y / prim_size.y
             );
-            alpha = 1.0f - dot(norm_offset, norm_offset) * 2.0f;
+            alpha = (1.0f - dot(norm_offset, norm_offset)) * 0.6f;
         } else { // body
             float norm_offset = prim_offset.y / prim_size.y;
             alpha = 1.0f - norm_offset * norm_offset;
