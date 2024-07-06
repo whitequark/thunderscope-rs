@@ -1,4 +1,8 @@
+use std::io::Read;
+
 use thunderscope::{ChannelConfiguration, DeviceCalibration, DeviceConfiguration, DeviceParameters};
+
+const FILENAME: &str = "test.data";
 
 fn main() -> thunderscope::Result<()> {
     env_logger::init();
@@ -12,20 +16,11 @@ fn main() -> thunderscope::Result<()> {
             ]
         };
         device.configure(&DeviceParameters::derive(&DeviceCalibration::default(), &config))?;
-        device.read_data(|buffer| {
-            const FILENAME: &str = "test.data";
-            const SAVE_SAMPLES: usize = 200000;
-            let samples = buffer.read().unwrap();
-            if samples.len() >= SAVE_SAMPLES {
-                println!("got {} samples, first 32: {:02X?}", samples.len(), &samples[..32]);
-                std::fs::write(FILENAME, &samples[..SAVE_SAMPLES]).unwrap();
-                println!("saved {} samples, run `python3 ./doc/plot_1ch.py {}`",
-                    SAVE_SAMPLES, FILENAME);
-                Err(())
-            } else {
-                Ok(())
-            }
-        })?;
+        let mut samples = vec![0; 200000];
+        device.stream_data().read_exact(samples.as_mut())?;
+        println!("got {} samples, first 32: {:02X?}", samples.len(), &samples[..256]);
+        std::fs::write(FILENAME, &samples[..]).unwrap();
+        println!("saved {} samples, run `python3 ./doc/plot_1ch.py {}`", samples.len(), FILENAME);
         Ok(())
     })
 }

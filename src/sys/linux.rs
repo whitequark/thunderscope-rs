@@ -68,8 +68,8 @@ impl ThunderscopeDriverImpl {
             let user_path = CString::new(device_path.to_owned() + "_user").unwrap();
             let d2h_path = CString::new(device_path.to_owned() + "_c2h_0").unwrap();
             Ok(ThunderscopeDriverImpl {
-                user_fd: FileDescriptor::open(user_path.as_ref()).map_err(Error::XdmaIo)?,
-                c2h_fd: FileDescriptor::open(d2h_path.as_ref()).map_err(Error::XdmaIo)?,
+                user_fd: FileDescriptor::open(user_path.as_ref())?,
+                c2h_fd: FileDescriptor::open(d2h_path.as_ref())?,
             })
         } else {
             Err(Error::NotFound)
@@ -79,14 +79,14 @@ impl ThunderscopeDriverImpl {
 
 impl super::Driver for ThunderscopeDriverImpl {
     fn read_user(&self, addr: usize, data: &mut [u8]) -> Result<()> {
-        self.user_fd.read_at(addr, data).map_err(Error::XdmaIo)
+        Ok(self.user_fd.read_at(addr, data)?)
     }
 
     fn write_user(&self, addr: usize, data: &[u8]) -> Result<()> {
-        self.user_fd.write_at(addr, data).map_err(Error::XdmaIo)
+        Ok(self.user_fd.write_at(addr, data)?)
     }
 
     fn read_dma(&self, addr: usize, data: &mut [u8]) -> Result<()> {
-        self.c2h_fd.read_at(addr, data).map_err(Error::XdmaIo)
+        Ok(self.c2h_fd.read_at(addr, data)?)
     }
 }

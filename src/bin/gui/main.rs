@@ -1,4 +1,3 @@
-use std::cmp::{max, min};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,17 +18,11 @@ use glutin::display::{GetGlDisplay, GlDisplay};
 
 use glow::{Context as GlowContext, HasContext};
 
-#[derive(Debug, Clone, Copy)]
-pub enum TriggerEdge {
-    Rising,
-    Falling,
-    Both
-}
+use thunderscope::EdgeFilter;
 
-const TRIGGER_EDGE: TriggerEdge = TriggerEdge::Rising;
+const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
 const TRIGGER_LEVEL: i8 = 50;
-const SAMPLE_COUNT: usize = 200_000;
-const HOLDOFF_DURATION: usize = 0; // on top of `SAMPLE_COUNT``
+const SAMPLE_COUNT: usize = 250_000;
 
 struct Renderer {
     program: <glow::Context as HasContext>::Program,
@@ -179,6 +172,8 @@ impl ApplicationHandler for Application {
 }
 
 fn sampler(capture_data: Arc<Mutex<Vec<u8>>>) -> thunderscope::Result<()> {
+    use std::io::{Read, BufRead};
+
     thunderscope::Device::with(|device| {
         device.startup()?;
         device.configure(&thunderscope::DeviceParameters::derive(
@@ -188,98 +183,41 @@ fn sampler(capture_data: Arc<Mutex<Vec<u8>>>) -> thunderscope::Result<()> {
                     ..Default::default()
                 }), None, None, None]
             }))?;
+        // Should perform best with 8 MB requests.
+        let mut reader = vmap::io::BufReader::new(device.stream_data(), 1 << 20)
+            .expect("could not map ring buffer");
+        reader.set_lowat(15);
 
         #[derive(Debug, Clone, Copy, Default)]
-        enum TriggerMemory {
-            #[default]
-            Below,
-            Above
-        }
-
-        #[derive(Debug, Clone, Copy, Default)]
-        enum TriggerState {
+        enum CaptureState {
             #[default]
             Scanning,
-            Capturing { offset: usize },
-            Holdoff { elapsed: usize },
+            Capturing,
         }
 
-        let trigger_edge = TRIGGER_EDGE;
-        let (trigger_above, trigger_below) = (TRIGGER_LEVEL + 2, TRIGGER_LEVEL - 2);
-
-        let mut trigger_memory = TriggerMemory::default();
-        let mut trigger_state = TriggerState::default();
-        device.read_data(|buffer| {
-            log::debug!("read_data got {} committed samples", buffer.committed_len());
-            while buffer.committed_len() > 0 {
-                let samples = buffer.read().unwrap();
-                let processed;
-                (processed, trigger_state) = match trigger_state {
-                    TriggerState::Scanning => {
-                        let mut trigger_at = None;
-                        for (index, &sample) in samples.iter().enumerate() {
-                            let sample = sample as i8;
-                            match trigger_memory {
-                                TriggerMemory::Below if sample > trigger_above => {
-                                    trigger_memory = TriggerMemory::Above;
-                                    if let TriggerEdge::Rising | TriggerEdge::Both = trigger_edge {
-                                        trigger_at = Some(index);
-                                        break
-                                    }
-                                }
-                                TriggerMemory::Above if sample < trigger_below => {
-                                    trigger_memory = TriggerMemory::Below;
-                                    if let TriggerEdge::Falling | TriggerEdge::Both = trigger_edge {
-                                        trigger_at = Some(index);
-                                        break
-                                    }
-                                }
-                                _ => ()
-                            }
-                        }
-                        match trigger_at {
-                            None => {
-                                // no trigger, decommit all and continue scanning
-                                (samples.len(), trigger_state)
-                            }
-                            Some(index) => {
-                                // triggered, decommit up to trigger and capture
-                                (index, TriggerState::Capturing { offset: 0 })
-                            }
-                        }
+        let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
+        let mut capture_state = CaptureState::default();
+        loop {
+            match capture_state {
+                CaptureState::Scanning => {
+                    let samples = reader.fill_buf()?;
+                    let (offset, edge_opt) = trigger.find(unsafe {
+                        &*(samples as *const [u8] as *const [i8])
+                    }, TRIGGER_EDGE);
+                    reader.consume(offset);
+                    if edge_opt.is_some() {
+                        capture_state = CaptureState::Capturing;
                     }
-                    TriggerState::Capturing { offset } => {
-                        let remaining = max(samples.len(), SAMPLE_COUNT - offset);
-                        if let Ok(mut buffer) = capture_data.try_lock() {
-                            let available = min(samples.len(), SAMPLE_COUNT - offset);
-                            buffer[offset..offset + available].copy_from_slice(&samples[..available])
-                        } // never block waiting for GUI
-                        if remaining <= samples.len() {
-                            if HOLDOFF_DURATION > 0 {
-                                (remaining, TriggerState::Holdoff { elapsed: 0 })
-                            } else {
-                                (remaining, TriggerState::Scanning)
-                            }
-                        } else {
-                            let offset = offset + samples.len();
-                            (samples.len(), TriggerState::Capturing { offset })
-                        }
-                    },
-                    TriggerState::Holdoff { elapsed } => {
-                        let remaining = max(samples.len(), HOLDOFF_DURATION - elapsed);
-                        if remaining <= samples.len() {
-                            (remaining, TriggerState::Scanning)
-                        } else {
-                            let elapsed = elapsed + samples.len();
-                            (samples.len(), TriggerState::Holdoff { elapsed })
-                        }
+                }
+                CaptureState::Capturing => {
+                     // never block waiting for GUI
+                    if let Ok(mut buffer) = capture_data.try_lock() {
+                        reader.read(&mut buffer[..])?;
                     }
-                };
-                buffer.decommit(processed);
-            };
-            Ok(())
-        })?;
-        Ok(())
+                    capture_state = CaptureState::Scanning;
+                }
+            }
+        }
     })
 }
 
@@ -287,6 +225,7 @@ fn main() {
     env_logger::Builder::from_default_env()
         .format_timestamp_micros()
         .filter_level(log::LevelFilter::Info)
+        .parse_default_env()
         .init();
     // create a window
     let event_loop = EventLoop::new().expect("failed to create event loop");

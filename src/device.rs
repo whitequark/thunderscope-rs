@@ -1,9 +1,7 @@
 use std::time::Duration;
 use std::thread;
 
-use bipbuffer::BipBuffer;
-
-use crate::{Error, Result};
+use crate::Result;
 use crate::sys::Driver;
 use crate::regs::axi::{self, Control, FifoIsr, Status};
 use crate::regs::adc;
@@ -402,61 +400,56 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn read_data<F, E>(&mut self, mut process_data: F) -> Result<E>
-            where F: FnMut(&mut BipBuffer<u8>) -> std::result::Result<(), E> {
+    pub fn stream_data<'a>(&'a mut self) -> Streamer<'a, D> {
+        Streamer { device: self, cursor: None }
+    }
+}
+
+#[derive(Debug)]
+pub struct Streamer<'a, D: Driver> {
+    device: &'a mut Device<D>,
+    cursor: Option<usize>,
+}
+
+impl<'a, D: Driver> std::io::Read for Streamer<'a, D> {
+    fn read(&mut self, mut buffer: &mut [u8]) -> std::io::Result<usize> {
         const PAGE_BITS: usize = 12; // 4 Ki
-        const MEMORY_PAGES: usize = 1 << 16; // 64 Ki x (1 << PAGE_BITS) = 256 Mi
+        const MEMORY_SIZE: usize = 1 << 16 << PAGE_BITS; // 64 Ki x (1 << PAGE_BITS) = 256 Mi
 
-        // the size of the buffer determines tolerance to timing jitter. a 128 MiB buffer
-        // at 1 GSa/s corresponds to ~135 ms of lag, which seems sufficient for most uses.
-        let mut buffer = bipbuffer::BipBuffer::<u8>::new((MEMORY_PAGES / 2) << PAGE_BITS);
-
-        fn write_to_buffer<F>(buffer: &mut BipBuffer<u8>, length: usize, f: F) -> Result<()>
-                where F: FnOnce(&mut [u8]) -> Result<()> {
-            match buffer.reserve(length) {
-                // there was enough space in the buffer
-                Ok(slice) if slice.len() == length => {
-                    f(slice)?;
-                    Ok(buffer.commit(length))
-                }
-                // there wasn't; jitter was too high for the buffer size and/or callback latency
-                Ok(_) | Err(_) => {
-                    log::error!("Buffer overflow, system may be too slow or overloaded");
-                    Err(Error::Overflow { required: length, available: buffer.reserved_len() })
-                }
-            }
-        }
-
-        let mut prev_writer = self.read_status()?.pages_moved();
-        loop {
+        let mut written = 0;
+        while buffer.len() > 0 {
             // check if there is an error condition set
             // these should never appear so long as the FPGA is functioning correctly
-            let status = self.read_status()?;
+            let status = self.device.read_status()?;
             if status.intersects(Status::FifoOverflow | Status::DatamoverError) {
-                log::error!("Data mover failure, power cycle the device");
-                panic!("Data mover failure: {:?} (overflow by {} cycles)",
+                log::error!("data mover failure, power cycle the device");
+                panic!("data mover failure: {:?} (overflow by {} cycles)",
                     status, status.overflow_cycles());
             }
-            // read the data into the buffer, handling wraparound of the writer
-            let curr_writer = self.read_status()?.pages_moved();
-            if curr_writer >= prev_writer { // no wraparound
-                log::debug!("read_data(): at page {:04X}: +{:04X}",
-                    curr_writer, curr_writer - prev_writer);
-                write_to_buffer(&mut buffer, (curr_writer - prev_writer) << PAGE_BITS, |slice|
-                    self.driver.read_dma(prev_writer << PAGE_BITS, slice))?;
-            } else { // wraparound
-                log::debug!("read_data(): at page {:04X}: +{:04X}+{:04X}",
-                    curr_writer, MEMORY_PAGES - prev_writer, curr_writer);
-                write_to_buffer(&mut buffer, (MEMORY_PAGES - prev_writer) << PAGE_BITS, |slice|
-                    self.driver.read_dma(prev_writer << PAGE_BITS, slice))?;
-                write_to_buffer(&mut buffer, curr_writer << PAGE_BITS, |slice|
-                    self.driver.read_dma(0, slice))?;
-            }
-            prev_writer = curr_writer;
-            // run the processing callback
-            if let Err(exit) = process_data(&mut buffer) {
-                return Ok(exit)
+            // read any newly available data
+            let next_cursor = status.pages_moved() << PAGE_BITS;
+            let (prev_cursor, length) = match self.cursor {
+                None => { // first ever read
+                    self.cursor = Some(next_cursor);
+                    continue
+                }
+                Some(prev_cursor) if next_cursor < prev_cursor => // wraparound
+                    (prev_cursor, buffer.len().min(MEMORY_SIZE - prev_cursor)),
+                Some(prev_cursor) => // no wraparound
+                    (prev_cursor, buffer.len().min(next_cursor - prev_cursor)),
+            };
+            if length > 0 {
+                log::debug!("streaming at {:08X}: reading {:08X}", prev_cursor, length);
+                let (chunk, rest) = buffer.split_at_mut(length);
+                self.device.driver.read_dma(prev_cursor, chunk)?;
+                self.cursor = Some((prev_cursor + length) % MEMORY_SIZE);
+                written += length;
+                buffer = rest;
+            } else {
+                break
             }
         }
+        Ok(written)
     }
+
 }

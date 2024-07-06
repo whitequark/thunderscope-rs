@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libc = "0.2"
 log = "0.4"
 env_logger = "0.11"
 bitflags = "2.6"
-bipbuffer = "0.1"
+libc = "0.2"
+wide = "0.7"
+vmap = "0.6"
 
 winit = { version = "0.30", optional = true }
 glutin = { version = "0.32", optional = true }
