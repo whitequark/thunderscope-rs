@@ -22,7 +22,7 @@ use thunderscope::EdgeFilter;
 
 const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
 const TRIGGER_LEVEL: i8 = 50;
-const SAMPLE_COUNT: usize = 250_000;
+const SAMPLE_COUNT: usize = 2_000;
 
 struct Renderer {
     program: <glow::Context as HasContext>::Program,
@@ -66,12 +66,13 @@ impl Renderer {
                 data_array:
                     gl.create_buffer().expect("failed to create buffer"),
             };
-            renderer.update(gl, &[0u8; SAMPLE_COUNT]);
+            renderer.update(gl, &[0; SAMPLE_COUNT]);
             renderer
         }
     }
 
-    pub fn update(&self, gl: &glow::Context, data: &[u8]) {
+    pub fn update(&self, gl: &glow::Context, data: &[i8]) {
+        let data = bytemuck::cast_slice(data);
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.data_array));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STREAM_DRAW);
@@ -124,7 +125,7 @@ impl Renderer {
 }
 
 struct Application {
-    capture_data: Arc<Mutex<Vec<u8>>>,
+    capture_data: Arc<Mutex<Vec<i8>>>,
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
     glow_context: GlowContext,
@@ -171,8 +172,8 @@ impl ApplicationHandler for Application {
     }
 }
 
-fn sampler(capture_data: Arc<Mutex<Vec<u8>>>) -> thunderscope::Result<()> {
-    use std::io::{Read, BufRead};
+fn sampler(capture_data: Arc<Mutex<Vec<i8>>>) -> thunderscope::Result<()> {
+    use std::io::Read;
 
     thunderscope::Device::with(|device| {
         device.startup()?;
@@ -183,39 +184,41 @@ fn sampler(capture_data: Arc<Mutex<Vec<u8>>>) -> thunderscope::Result<()> {
                     ..Default::default()
                 }), None, None, None]
             }))?;
-        // Should perform best with 8 MB requests.
-        let mut reader = vmap::io::BufReader::new(device.stream_data(), 1 << 20)
-            .expect("could not map ring buffer");
-        reader.set_lowat(15);
 
-        #[derive(Debug, Clone, Copy, Default)]
-        enum CaptureState {
-            #[default]
-            Scanning,
-            Capturing,
-        }
-
+        let mut reader = device.stream_data();
+        let mut buffer = thunderscope::RingBuffer::new(1 << 23)?;
         let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
-        let mut capture_state = CaptureState::default();
+        let mut cursor = buffer.cursor();
+        let mut available = 0;
         loop {
-            match capture_state {
-                CaptureState::Scanning => {
-                    let samples = reader.fill_buf()?;
-                    let (offset, edge_opt) = trigger.find(unsafe {
-                        &*(samples as *const [u8] as *const [i8])
-                    }, TRIGGER_EDGE);
-                    reader.consume(offset);
-                    if edge_opt.is_some() {
-                        capture_state = CaptureState::Capturing;
-                    }
+            // refill buffer
+            let refill_by = buffer.len() - available;
+            available += buffer.append(refill_by, |slice| reader.read(slice))?;
+            log::debug!("sampler: refilled buffer for trigger by {} bytes ({} available)",
+                refill_by, available);
+            // find trigger
+            let data = buffer.read(cursor, available);
+            let (processed, edge) = trigger.find(data, TRIGGER_EDGE);
+            log::debug!("sampler: trigger consumed {} bytes ({} available)",
+                processed, available);
+            cursor += processed;
+            available -= processed;
+            if let Some(edge) = edge {
+                // check if we need to capture more
+                if available < SAMPLE_COUNT {
+                    let refill_by = SAMPLE_COUNT - available;
+                    available += buffer.append(refill_by, |slice| reader.read(slice))?;
+                    log::debug!("sampler: refilled buffer for capture by {} bytes ({} available)",
+                        refill_by, available);
                 }
-                CaptureState::Capturing => {
-                     // never block waiting for GUI
-                    if let Ok(mut buffer) = capture_data.try_lock() {
-                        reader.read(&mut buffer[..])?;
-                    }
-                    capture_state = CaptureState::Scanning;
+                // display data
+                debug_assert!(available >= SAMPLE_COUNT);
+                if let Ok(mut display_buffer) = capture_data.try_lock() {
+                    display_buffer.copy_from_slice(buffer.read(cursor, SAMPLE_COUNT));
+                    log::debug!("sampler: captured waveform for {:?} edge", edge);
                 }
+                cursor += SAMPLE_COUNT;
+                available -= SAMPLE_COUNT;
             }
         }
     })

@@ -6,11 +6,13 @@ mod config;
 mod params;
 mod device;
 mod trigger;
+mod capture;
 
 #[derive(Debug)]
 pub enum Error {
     NotFound,
-    XdmaIo(std::io::Error),
+    Xdma(std::io::Error),
+    Vmap(vmap::Error),
     Other(Box<dyn std::error::Error + Sync + Send + 'static>),
 }
 
@@ -19,8 +21,10 @@ impl std::fmt::Display for Error {
         match self {
             Self::NotFound =>
                 write!(f, "device not connected"),
-            Self::XdmaIo(io_error) =>
-                write!(f, "XDMA I/O error: {}", io_error),
+            Self::Xdma(error) =>
+                write!(f, "XDMA error: {}", error),
+            Self::Vmap(error) =>
+                write!(f, "virtual memory mapping error: {}", error),
             Self::Other(error) =>
                 write!(f, "{}", error),
         }
@@ -30,26 +34,16 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            &Self::XdmaIo(ref io_error) => Some(io_error),
+            &Self::Xdma(ref error) => Some(error),
+            &Self::Vmap(ref error) => Some(error),
             _ => None
         }
     }
 }
 
-impl From<Error> for std::io::Error {
-    fn from(error: Error) -> Self {
-        match error {
-            Error::NotFound => // converted from std::io::Error in first place
-                Self::new(std::io::ErrorKind::NotFound, error),
-            Error::XdmaIo(io_error) =>
-                io_error,
-            Error::Other(error) => {
-                match error.downcast::<std::io::Error>() {
-                    Ok(error) => *error,
-                    Err(error) => std::io::Error::new(io::ErrorKind::Other, error)
-                }
-            }
-        }
+impl From<vmap::Error> for Error {
+    fn from(error: vmap::Error) -> Self {
+        Error::Vmap(error)
     }
 }
 
@@ -62,10 +56,25 @@ impl From<std::io::Error> for Error {
     }
 }
 
+impl From<Error> for std::io::Error {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::NotFound => // converted from std::io::Error in first place
+                Self::new(std::io::ErrorKind::NotFound, error),
+            Error::Xdma(error) => error,
+            Error::Vmap(error) => error.into(),
+            Error::Other(error) => {
+                match error.downcast::<std::io::Error>() {
+                    Ok(error)  => *error,
+                    Err(error) => std::io::Error::new(std::io::ErrorKind::Other, error)
+                }
+            }
+        }
+    }
+}
+
 pub type Result<T> =
     core::result::Result<T, Error>;
-
-use std::io;
 
 pub use config::{
     Termination,
@@ -95,4 +104,9 @@ pub use trigger::{
     EdgeFilter,
     Edge,
     Trigger,
+};
+
+pub use capture::{
+    RingCursor,
+    RingBuffer,
 };

@@ -7,8 +7,9 @@ edition = "2021"
 log = "0.4"
 env_logger = "0.11"
 bitflags = "2.6"
-libc = "0.2"
+bytemuck = "1.16"
 wide = "0.7"
+libc = "0.2"
 vmap = "0.6"
 
 winit = { version = "0.30", optional = true }

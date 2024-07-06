@@ -1250,6 +1250,7 @@ name = "thunderscope"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.6.0",
+ "bytemuck",
  "env_logger",
  "glow",
  "glutin",
