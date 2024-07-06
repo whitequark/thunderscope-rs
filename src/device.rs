@@ -12,15 +12,15 @@ const SPI_BUS_ADC: u8 = 0;
 const SPI_BUS_PGA: [u8; 4] = [2, 3, 4, 5];
 
 #[derive(Debug)]
-pub struct Device<D: Driver> {
-    driver: D,
+pub struct Device {
+    driver: Driver,
 }
 
-impl Device<crate::sys::imp::ThunderscopeDriverImpl> {
-    pub fn new() -> Result<Device<crate::sys::imp::ThunderscopeDriverImpl>> {
+impl Device {
+    pub fn new() -> Result<Device> {
         // FIXME: do this better
         #[cfg(any(target_os = "linux"))]
-        let driver = crate::sys::imp::ThunderscopeDriverImpl::new("/dev/xdma0")?;
+        let driver = Driver::new("/dev/xdma0")?;
         Ok(Device { driver })
     }
 
@@ -34,7 +34,7 @@ impl Device<crate::sys::imp::ThunderscopeDriverImpl> {
     }
 }
 
-impl<D: Driver> Device<D> {
+impl Device {
     fn read_user_u32(&mut self, addr: usize) -> Result<u32> {
         let mut bytes = [0u8; 4];
         self.driver.read_user(addr, &mut bytes[..])?;
@@ -403,18 +403,18 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
-    pub fn stream_data<'a>(&'a mut self) -> Streamer<'a, D> {
+    pub fn stream_data<'a>(&'a mut self) -> Streamer<'a> {
         Streamer { device: self, cursor: None }
     }
 }
 
 #[derive(Debug)]
-pub struct Streamer<'a, D: Driver> {
-    device: &'a mut Device<D>,
+pub struct Streamer<'a> {
+    device: &'a mut Device,
     cursor: Option<usize>,
 }
 
-impl<'a, D: Driver> std::io::Read for Streamer<'a, D> {
+impl<'a> std::io::Read for Streamer<'a> {
     fn read(&mut self, mut buffer: &mut [u8]) -> std::io::Result<usize> {
         const PAGE_BITS: usize = 12; // 4 Ki
         const MEMORY_SIZE: usize = 1 << 16 << PAGE_BITS; // 64 Ki x (1 << PAGE_BITS) = 256 Mi

@@ -1,21 +1,19 @@
 use std::ffi::{CStr, CString};
 use std::{fs, io};
 use libc::{c_int, c_void};
-use crate::{Result, Error};
+use crate::Result;
 
 #[derive(Debug)]
-struct FileDescriptor {
-    inner: c_int
-}
+struct Fd(c_int);
 
-impl FileDescriptor {
-    fn open(path: &CStr) -> io::Result<FileDescriptor> {
+impl Fd {
+    fn open(path: &CStr) -> io::Result<Fd> {
         unsafe {
             let fd = libc::open(path.as_ptr(), libc::O_RDWR);
             if fd == -1 {
                 Err(io::Error::last_os_error())
             } else {
-                Ok(FileDescriptor { inner: fd })
+                Ok(Fd(fd))
             }
         }
     }
@@ -23,7 +21,7 @@ impl FileDescriptor {
     fn read_at(&self, offset: usize, data: &mut [u8]) -> io::Result<()> {
         unsafe {
             let bytes_read = libc::pread(
-                self.inner, data.as_mut_ptr() as *mut c_void, data.len(), offset as i64) as usize;
+                self.0, data.as_mut_ptr() as *mut c_void, data.len(), offset as i64) as usize;
             if bytes_read != data.len() {
                 Err(io::Error::last_os_error())
             } else {
@@ -35,7 +33,7 @@ impl FileDescriptor {
     fn write_at(&self, offset: usize, data: &[u8]) -> io::Result<()> {
         unsafe {
             let bytes_written = libc::pwrite(
-                self.inner, data.as_ptr() as *const c_void, data.len(), offset as i64) as usize;
+                self.0, data.as_ptr() as *const c_void, data.len(), offset as i64) as usize;
             if bytes_written != data.len() {
                 Err(io::Error::last_os_error())
             } else {
@@ -45,10 +43,10 @@ impl FileDescriptor {
     }
 }
 
-impl Drop for FileDescriptor {
+impl Drop for Fd {
     fn drop(&mut self) {
         unsafe {
-            if libc::close(self.inner) == -1 {
+            if libc::close(self.0) == -1 {
                 panic!("error closing fd: {}", io::Error::last_os_error())
             }
         }
@@ -56,37 +54,33 @@ impl Drop for FileDescriptor {
 }
 
 #[derive(Debug)]
-pub struct ThunderscopeDriverImpl {
-    user_fd: FileDescriptor,
-    c2h_fd: FileDescriptor,
+pub struct DriverData {
+    user_fd: Fd,
+    c2h_fd: Fd,
 }
 
-impl ThunderscopeDriverImpl {
-    pub fn new(device_path: &str) -> Result<ThunderscopeDriverImpl> {
-        let control_path = device_path.to_owned() + "_control";
-        if fs::metadata(control_path).is_ok() {
-            let user_path = CString::new(device_path.to_owned() + "_user").unwrap();
-            let d2h_path = CString::new(device_path.to_owned() + "_c2h_0").unwrap();
-            Ok(ThunderscopeDriverImpl {
-                user_fd: FileDescriptor::open(user_path.as_ref())?,
-                c2h_fd: FileDescriptor::open(d2h_path.as_ref())?,
-            })
-        } else {
-            Err(Error::NotFound)
-        }
+pub fn open(device_path: &str) -> Result<DriverData> {
+    let control_path = device_path.to_owned() + "_control";
+    if fs::metadata(control_path).is_ok() {
+        let user_path = CString::new(device_path.to_owned() + "_user").unwrap();
+        let d2h_path = CString::new(device_path.to_owned() + "_c2h_0").unwrap();
+        Ok(DriverData {
+            user_fd: Fd::open(user_path.as_ref())?,
+            c2h_fd: Fd::open(d2h_path.as_ref())?,
+        })
+    } else {
+        Err(crate::Error::NotFound)
     }
 }
 
-impl super::Driver for ThunderscopeDriverImpl {
-    fn read_user(&self, addr: usize, data: &mut [u8]) -> Result<()> {
-        Ok(self.user_fd.read_at(addr, data)?)
-    }
+pub fn read_user(driver_data: &DriverData, addr: usize, data: &mut [u8]) -> Result<()> {
+    Ok(driver_data.user_fd.read_at(addr, data)?)
+}
 
-    fn write_user(&self, addr: usize, data: &[u8]) -> Result<()> {
-        Ok(self.user_fd.write_at(addr, data)?)
-    }
+pub fn write_user(driver_data: &DriverData, addr: usize, data: &[u8]) -> Result<()> {
+    Ok(driver_data.user_fd.write_at(addr, data)?)
+}
 
-    fn read_dma(&self, addr: usize, data: &mut [u8]) -> Result<()> {
-        Ok(self.c2h_fd.read_at(addr, data)?)
-    }
+pub fn read_dma(driver_data: &DriverData, addr: usize, data: &mut [u8]) -> Result<()> {
+    Ok(driver_data.c2h_fd.read_at(addr, data)?)
 }

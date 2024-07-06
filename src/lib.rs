@@ -97,8 +97,7 @@ pub use params::{
     DeviceCalibration,
 };
 
-pub type Device =
-    device::Device<crate::sys::imp::ThunderscopeDriverImpl>;
+pub use device::Device;
 
 pub use trigger::{
     EdgeFilter,

@@ -1,12 +1,26 @@
-use crate::Error;
-
-pub trait Driver {
-    fn read_user(&self, addr: usize, data: &mut [u8]) -> Result<(), Error>;
-    fn write_user(&self, addr: usize, data: &[u8]) -> Result<(), Error>;
-
-    fn read_dma(&self, addr: usize, data: &mut [u8]) -> Result<(), Error>;
-}
+use crate::Result;
 
 #[cfg(any(target_os = "linux"))]
 #[path = "linux.rs"]
-pub mod imp;
+mod imp;
+
+#[derive(Debug)]
+pub struct Driver(imp::DriverData);
+
+impl Driver {
+    pub fn new(device_path: &str) -> Result<Self> {
+        Ok(Self(imp::open(device_path)?))
+    }
+
+    pub fn read_user(&self, addr: usize, data: &mut [u8]) -> Result<()> {
+        imp::read_user(&self.0, addr, data)
+    }
+
+    pub fn write_user(&self, addr: usize, data: &[u8]) -> Result<()> {
+        imp::write_user(&self.0, addr, data)
+    }
+
+    pub fn read_dma(&self, addr: usize, data: &mut [u8]) -> Result<()> {
+        imp::read_dma(&self.0, addr, data)
+    }
+}
