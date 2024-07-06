@@ -326,8 +326,11 @@ impl<D: Driver> Device<D> {
 
     pub fn startup(&mut self) -> Result<()> {
         log::info!("startup()");
+        // disable the data mover first and let it stop, in case it was running before
+        // this prevents device crashes after unclean shutdowns (think ^C)
+        self.disable_datamover()?;
         // enable the 3V3 rail and wait for it to stabilize
-        self.write_control(Control::ClockGenResetN | Control::Rail3V3Enabled)?;
+        self.modify_control(|val| val.insert(Control::ClockGenResetN | Control::Rail3V3Enabled))?;
         thread::sleep(Duration::from_millis(10));
         // The RSTN pin must be asserted once after power-up.
         // Reset should be asserted for at least 1μs.
