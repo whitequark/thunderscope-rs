@@ -247,7 +247,7 @@ impl<D: Driver> Device<D> {
    }
 
    fn configure_digipot_trimdac(&mut self, index: usize, params: &ChannelParameters) -> Result<()> {
-        const WIPER_ADDRESS: [u8; 4] = [0x6, 0x0, 0x1, 0x4];
+        const WIPER_ADDRESS: [u8; 4] = [0x6, 0x0, 0x1, 0x7];
         self.write_digipot_input(WIPER_ADDRESS[index],
             params.offset_magnitude.mcp4432t_503e_code())?;
         self.write_trimdac_input(index as u8,
