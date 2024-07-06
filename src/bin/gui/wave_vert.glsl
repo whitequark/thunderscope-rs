@@ -18,11 +18,10 @@ const vec2 line_quad[] = vec2[](
 );
 
 mat2 line_rotation(vec2 line_a, vec2 line_b) {
-    vec2 line_ab = line_b - line_a;
-    float angle = atan(line_ab.y, line_ab.x);
+    vec2 norm_ab = normalize(line_b - line_a);
     return mat2(
-        cos(angle), -sin(angle),
-        sin(angle),  cos(angle)
+        norm_ab.x,  norm_ab.y,
+        norm_ab.y, -norm_ab.x
     );
 }
 
