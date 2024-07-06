@@ -98,7 +98,7 @@ impl Trigger {
 }
 
 macro_rules! scan_impl {
-    { $( $decl:tt )+ } => {
+    { < $simd_ty:ident > $( $decl:tt )+ } => {
         #[inline(never)] // makes assembly more readable; serves no other purpose
         $( $decl )+(&mut self, samples: &mut &[i8], filter: EdgeFilter) -> Option<Edge> {
             // right now it is assumed that this function would be called with a holdoff of
@@ -106,16 +106,17 @@ macro_rules! scan_impl {
             // performance is not a design goal. if Nth trigger is implemented, this might have
             // to be changed.
 
-            use wide::{i8x16, CmpGt, CmpLt};
+            use wide::{$simd_ty, CmpGt, CmpLt};
+            const LANES: usize = wide::$simd_ty::LANES as usize;
 
-            fn scan_for<P: Fn(i8x16) -> i8x16>(samples: &mut &[i8], predicate: P) -> bool {
+            fn scan_for<P: Fn($simd_ty) -> $simd_ty>(samples: &mut &[i8], predicate: P) -> bool {
                 let mut found = false;
                 let mut offset = 0;
-                for &group in samples.array_chunks::<16>() {
-                    let mask = predicate(i8x16::new(group));
+                for &group in samples.array_chunks::<LANES>() {
+                    let mask = predicate($simd_ty::new(group));
                     // rustc generates ctlz even if the increment is within the condition; might
                     // as well lift it out of the condition
-                    offset += (mask.move_mask() as u16).trailing_zeros() as usize;
+                    offset += (mask.move_mask().trailing_zeros() as usize).min(LANES);
                     if mask.any() {
                         found = true;
                         break
@@ -139,8 +140,8 @@ macro_rules! scan_impl {
                 _ => ()
             }
 
-            let above = i8x16::splat(self.above);
-            let below = i8x16::splat(self.below);
+            let above = $simd_ty::splat(self.above);
+            let below = $simd_ty::splat(self.below);
             loop {
                 debug_assert!(!matches!(self.state, State::Fresh));
                 let found = match self.state {
@@ -172,9 +173,9 @@ macro_rules! scan_impl {
 }
 
 impl Trigger {
-    scan_impl! { fn scan_generic }
-    scan_impl! { #[target_feature(enable = "avx")]  unsafe fn scan_avx }
-    scan_impl! { #[target_feature(enable = "avx2")] unsafe fn scan_avx2 }
+    scan_impl! { <i8x16> fn scan_generic }
+    scan_impl! { <i8x32> #[target_feature(enable = "avx")]  unsafe fn scan_avx }
+    scan_impl! { <i8x32> #[target_feature(enable = "avx2")] unsafe fn scan_avx2 }
 }
 
 #[cfg(test)]
