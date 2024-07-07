@@ -442,8 +442,9 @@ impl<'a> std::io::Read for Streamer<'a> {
                     (prev_cursor, buffer.len().min(next_cursor - prev_cursor)),
             };
             if length > 0 {
-                log::debug!("streaming at {:08X}: reading {:08X}", prev_cursor, length);
                 let (chunk, rest) = buffer.split_at_mut(length);
+                log::debug!("streaming {:#010x?}+{:#x?} to {:#x?}+{:#x?}",
+                    prev_cursor, length, chunk.as_ptr(), chunk.len());
                 self.device.driver.read_dma(prev_cursor, chunk)?;
                 self.cursor = Some((prev_cursor + length) % MEMORY_SIZE);
                 written += length;

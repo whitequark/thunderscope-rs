@@ -9,10 +9,16 @@ pub struct RingSlice {
     len: usize,
 }
 
+// SAFETY: Conceptually the same as `Box<[u8]>`. The destructor can run on any thread.
+unsafe impl Send for RingSlice {}
+
 impl RingSlice {
-    pub fn new(hint: usize) -> Result<RingSlice> {
-        let len = hint.next_multiple_of(vmap::page_size());
+    pub fn new(min_size: usize) -> Result<RingSlice> {
+        let len = min_size.next_multiple_of(vmap::page_size());
+        // `pread()` gets unhappy if you read into the same page twice from both ends.
+        let len = len.max(vmap::page_size() * 2);
         let ptr = vmap::os::map_ring(len)?;
+        log::trace!("mapped ring slice at {:?}+{:#x?}*2", ptr, len);
         Ok(RingSlice { ptr, len })
     }
 
@@ -33,7 +39,8 @@ impl Drop for RingSlice {
     fn drop(&mut self) {
         // SAFETY: Mapped with the same parameters in `Self::new`.
         let result = unsafe { vmap::os::unmap_ring(self.ptr, self.len) };
-        result.expect("failed to unmap ring buffer");
+        result.expect("failed to unmap ring slice");
+        log::trace!("unmapped ring slice at {:?}+{:#x?}*2", self.ptr, self.len);
     }
 }
 
@@ -103,6 +110,10 @@ impl RingCursor {
     pub fn new(bound: usize) -> RingCursor {
         RingCursor { index: 0, bound }
     }
+
+    pub fn into_inner(self) -> usize {
+        self.index
+    }
 }
 
 impl Add<usize> for RingCursor {
@@ -140,8 +151,8 @@ pub struct RingBuffer {
 }
 
 impl RingBuffer {
-    pub fn new(size: usize) -> Result<RingBuffer> {
-        let buffer = RingSlice::new(size)?;
+    pub fn new(min_size: usize) -> Result<RingBuffer> {
+        let buffer = RingSlice::new(min_size)?;
         let cursor = RingCursor::new(buffer.len());
         Ok(RingBuffer { buffer, cursor })
     }
@@ -185,13 +196,13 @@ mod test {
 
     #[test]
     fn test_ring_buffer_overlap() {
-        let mut buf = RingSlice::new(4096).unwrap();
-        assert_eq!(buf.len(), 4096);
-        buf[4090..4096].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        let mut buf = RingSlice::new(8192).unwrap();
+        assert_eq!(buf.len(), 8192);
+        buf[8186..8192].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
         buf[0..6].copy_from_slice(&[7, 8, 9, 10, 11, 12]);
-        assert_eq!(&buf[4090..4096], &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(&buf[8186..8192], &[1, 2, 3, 4, 5, 6]);
         assert_eq!(&buf[0..6], &[7, 8, 9, 10, 11, 12]);
-        assert_eq!(&buf[4090..6], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(&buf[8186..6], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     }
 
     #[test]

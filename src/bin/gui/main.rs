@@ -1,7 +1,8 @@
+use std::io::Read;
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::event::{StartCause, WindowEvent};
@@ -23,17 +24,126 @@ use thunderscope::EdgeFilter;
 
 const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
 const TRIGGER_LEVEL: i8 = 50;
-const SAMPLE_COUNT: usize = 120_000;
+const SAMPLE_COUNT: usize = 128_000;
 const RENDER_LINES: bool = true;
+
+#[derive(Debug)]
+struct Waveform {
+    buffer: thunderscope::RingBuffer,
+    capture: Option<(thunderscope::RingCursor, usize)>
+}
+
+impl Waveform {
+    pub fn new(size: usize) -> thunderscope::Result<Waveform> {
+        let buffer = thunderscope::RingBuffer::new(size)?;
+        Ok(Waveform { buffer, capture: None })
+    }
+
+    pub fn capture_data(&self) -> Option<&[i8]> {
+        self.capture.map(|(cursor, length)| self.buffer.read(cursor, length))
+    }
+}
+
+struct Sampler {
+    // Sampler does not allocate the waveform buffers. It relies on a pair of channels acting like
+    // a bucket brigade: any received `Waveform` objects are filled in with captures and sent for
+    // further processing. Eventually the `Waveform` object comes back from the processing engine,
+    // and the closed cycle continues.
+    instrument: thunderscope::Device,
+    waveform_recv: Receiver<Waveform>,
+    waveform_send: Sender<Waveform>,
+}
+
+impl Sampler {
+    pub fn new(
+        instrument: thunderscope::Device,
+        waveform_recv: Receiver<Waveform>,
+        waveform_send: Sender<Waveform>
+    ) -> Sampler {
+        Sampler { instrument, waveform_recv, waveform_send }
+    }
+
+    pub fn start(mut self) -> std::thread::JoinHandle<thunderscope::Result<()>> {
+        thread::spawn(move || {
+            self.instrument.startup()?;
+            self.instrument.configure(&thunderscope::DeviceParameters::derive(
+                &thunderscope::DeviceCalibration::default(),
+                &thunderscope::DeviceConfiguration {
+                    channels: [Some(thunderscope::ChannelConfiguration {
+                        ..Default::default()
+                    }), None, None, None]
+                }))?;
+            let result = self.run();
+            self.instrument.shutdown()?;
+            Ok(result.expect("acquisition failed"))
+        })
+    }
+
+    fn run(&mut self) -> thunderscope::Result<()> {
+        let mut reader = self.instrument.stream_data();
+        let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
+        // prime the queue
+        let mut waveform = self.waveform_recv.recv().expect("failed to receive waveform");
+        loop {
+            waveform.capture = None;
+            let buffer = &mut waveform.buffer;
+            let mut cursor = buffer.cursor();
+            let mut available = 0;
+            // refill buffer
+            let refill_by = buffer.len() - available;
+            available += buffer.append(refill_by, |slice| reader.read(slice))?;
+            log::debug!("sampler: refilled buffer for trigger by {} bytes ({} available)",
+                refill_by, available);
+            // find trigger
+            let data = buffer.read(cursor, available);
+            let (processed, edge) = trigger.find(data, TRIGGER_EDGE);
+            cursor += processed;
+            available -= processed;
+            log::debug!("sampler: trigger consumed {} bytes ({} available)",
+                processed, available);
+            if let Some(edge) = edge {
+                // check if we need to capture more
+                if available < SAMPLE_COUNT {
+                    let refill_by = SAMPLE_COUNT - available;
+                    available += buffer.append(refill_by, |slice| reader.read(slice))?;
+                    debug_assert!(available >= SAMPLE_COUNT);
+                    log::debug!("sampler: refilled buffer for capture by {} bytes ({} available)",
+                        refill_by, available);
+                }
+                // submit data for processing
+                waveform.capture = Some((cursor, SAMPLE_COUNT));
+                log::debug!("sampler: captured waveform for {:?} edge ({}+{})",
+                    edge, cursor.into_inner(), SAMPLE_COUNT);
+                match self.waveform_recv.try_recv() {
+                    Err(_) => log::debug!("sampler: discarded waveform"),
+                    Ok(new_waveform) => {
+                        self.waveform_send.send(waveform).expect("failed to send waveform");
+                        log::debug!("sampler: submitted waveform");
+                        waveform = new_waveform;
+                    }
+                }
+                // reset trigger to resynchronize its state
+                trigger.reset();
+            }
+        }
+    }
+}
 
 struct Renderer {
     program: <glow::Context as HasContext>::Program,
     vertex_array: <glow::Context as HasContext>::VertexArray,
-    data_array: <glow::Context as HasContext>::Buffer,
+    sample_array: <glow::Context as HasContext>::Buffer,
+    waveform_recv: Receiver<Waveform>,
+    waveform_send: Sender<Waveform>,
+    waveform: Option<Waveform>
 }
 
 impl Renderer {
-    pub fn new(gl: &glow::Context) -> Self {
+    pub fn new(
+        gl: &glow::Context,
+        waveform_recv: Receiver<Waveform>,
+        waveform_send: Sender<Waveform>
+    ) -> Self {
         let shaders = [
             (glow::VERTEX_SHADER,   include_str!("wave_vert.glsl")),
             (glow::FRAGMENT_SHADER, include_str!("wave_frag.glsl")),
@@ -61,63 +171,38 @@ impl Renderer {
                 gl.delete_shader(shader);
             }
 
-            let renderer = Self {
+            let vertex_array = gl.create_vertex_array().expect("failed to create vertex array");
+            let data_array = gl.create_buffer().expect("failed to create buffer");
+            Self {
                 program,
-                vertex_array:
-                    gl.create_vertex_array().expect("failed to create vertex array"),
-                data_array:
-                    gl.create_buffer().expect("failed to create buffer"),
-            };
-            renderer.update(gl, &[0; SAMPLE_COUNT]);
-            renderer
+                vertex_array,
+                sample_array: data_array,
+                waveform_recv,
+                waveform_send,
+                waveform: None
+            }
         }
     }
 
-    pub fn update(&self, gl: &glow::Context, data: &[i8]) {
-        let data = bytemuck::cast_slice(data);
-        unsafe {
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.data_array));
-            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STREAM_DRAW);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+    pub fn poll(&mut self) -> bool {
+        match self.waveform_recv.try_recv() {
+            err @ Err(TryRecvError::Disconnected) =>
+                panic!("renderer: failed to receive waveform: {:?}", err),
+            Err(TryRecvError::Empty) => {
+                log::debug!("renderer: retained waveform");
+                false
+            }
+            Ok(new_waveform) => {
+                log::debug!("renderer: acquired waveform");
+                if let Some(old_waveform) = self.waveform.replace(new_waveform) {
+                    self.waveform_send.send(old_waveform).expect("failed to return waveform");
+                }
+                true
+            }
         }
     }
 
-    pub fn render(&self, gl: &glow::Context) {
-        unsafe {
-            let channel_color_loc = gl.get_uniform_location(self.program, "channel_color");
-            let sample_count_loc = gl.get_uniform_location(self.program, "sample_count");
-            let draw_lines_loc = gl.get_uniform_location(self.program, "draw_lines");
-            let sample_value0_loc = gl.get_attrib_location(self.program, "sample_value0")
-                .expect("could not retrieve attribute location");
-            let sample_value1_loc = gl.get_attrib_location(self.program, "sample_value1")
-                .expect("could not retrieve attribute location");
-
-            gl.clear_color(0.1, 0.0, 0.1, 1.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-
-            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-            gl.enable(glow::BLEND);
-
-            gl.use_program(Some(self.program));
-            gl.uniform_3_f32(channel_color_loc.as_ref(), 1.0, 1.0, 0.0);
-            gl.uniform_1_i32(sample_count_loc.as_ref(), SAMPLE_COUNT as i32);
-            gl.uniform_1_u32(draw_lines_loc.as_ref(), RENDER_LINES as u32);
-            gl.bind_vertex_array(Some(self.vertex_array));
-            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.data_array));
-            gl.enable_vertex_attrib_array(sample_value0_loc);
-            gl.vertex_attrib_pointer_f32(sample_value0_loc, 1, glow::BYTE, true, 1, 0);
-            gl.vertex_attrib_divisor(sample_value0_loc, 1);
-            gl.enable_vertex_attrib_array(sample_value1_loc);
-            gl.vertex_attrib_pointer_f32(sample_value1_loc, 1, glow::BYTE, true, 1, 1);
-            gl.vertex_attrib_divisor(sample_value1_loc, 1);
-            gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, SAMPLE_COUNT as i32);
-            gl.disable_vertex_attrib_array(sample_value0_loc);
-            gl.disable_vertex_attrib_array(sample_value1_loc);
-            gl.bind_buffer(glow::ARRAY_BUFFER, None);
-        }
-    }
-
-    pub fn resize(&self, gl: &glow::Context, width: u32, height: u32) {
+    pub fn resize(&mut self, gl: &glow::Context, width: u32, height: u32) {
         unsafe {
             gl.viewport(0, 0, width as i32, height as i32);
             gl.use_program(Some(self.program));
@@ -126,7 +211,45 @@ impl Renderer {
         }
     }
 
-    pub fn destroy(&self, gl: &glow::Context) {
+    pub fn render(&mut self, gl: &glow::Context) {
+        let Some(samples) = self.waveform.as_ref()
+            .and_then(|wfm| wfm.capture_data())
+            .map(|data| bytemuck::cast_slice(data)) else { return };
+        unsafe {
+            let draw_lines_loc = gl.get_uniform_location(self.program, "draw_lines");
+            let channel_color_loc = gl.get_uniform_location(self.program, "channel_color");
+            let sample_count_loc = gl.get_uniform_location(self.program, "sample_count");
+            let sample_value0_loc = gl.get_attrib_location(self.program, "sample_value0")
+                .expect("could not retrieve attribute location");
+            let sample_value1_loc = gl.get_attrib_location(self.program, "sample_value1")
+                .expect("could not retrieve attribute location");
+
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.enable(glow::BLEND);
+
+            gl.use_program(Some(self.program));
+            gl.uniform_1_u32(draw_lines_loc.as_ref(), RENDER_LINES as u32);
+            gl.uniform_3_f32(channel_color_loc.as_ref(), 1.0, 1.0, 0.0);
+            gl.uniform_1_i32(sample_count_loc.as_ref(), samples.len() as i32);
+            gl.bind_vertex_array(Some(self.vertex_array));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.sample_array));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, samples, glow::STREAM_DRAW);
+            gl.enable_vertex_attrib_array(sample_value0_loc);
+            gl.vertex_attrib_pointer_f32(sample_value0_loc, 1, glow::BYTE, true, 1, 0);
+            gl.vertex_attrib_divisor(sample_value0_loc, 1);
+            gl.enable_vertex_attrib_array(sample_value1_loc);
+            gl.vertex_attrib_pointer_f32(sample_value1_loc, 1, glow::BYTE, true, 1, 1);
+            gl.vertex_attrib_divisor(sample_value1_loc, 1);
+            gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, samples.len() as i32);
+            gl.disable_vertex_attrib_array(sample_value0_loc);
+            gl.disable_vertex_attrib_array(sample_value1_loc);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+
+            gl.disable(glow::BLEND);
+        }
+    }
+
+    pub fn destroy(&mut self, gl: &glow::Context) {
         unsafe {
             gl.delete_program(self.program);
             gl.delete_vertex_array(self.vertex_array);
@@ -135,10 +258,9 @@ impl Renderer {
 }
 
 struct Application {
-    capture_data: Arc<Mutex<Vec<i8>>>,
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
-    glow_context: GlowContext,
+    gl_library: GlowContext,
     renderer: Renderer,
     window: Window,
 }
@@ -149,20 +271,26 @@ impl ApplicationHandler for Application {
     fn window_event(&mut self, event_loop: &ActiveEventLoop,
             _window_id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::RedrawRequested => {
-                self.renderer.render(&self.glow_context);
-                self.gl_surface.swap_buffers(&self.gl_context)
-                    .expect("failed to swap buffers");
-            }
             WindowEvent::Resized(size) if size.width != 0 && size.height != 0 => {
-                self.renderer.resize(&self.glow_context, size.width, size.height);
+                self.renderer.resize(&self.gl_library, size.width, size.height);
                 self.gl_surface.resize(&self.gl_context,
                     NonZeroU32::new(size.width).unwrap(),
                     NonZeroU32::new(size.height).unwrap(),
                 );
             }
+            WindowEvent::RedrawRequested => {
+                self.window.pre_present_notify();
+                let gl = &self.gl_library;
+                unsafe {
+                    gl.clear_color(0.1, 0.0, 0.1, 1.0);
+                    gl.clear(glow::COLOR_BUFFER_BIT);
+                }
+                self.renderer.render(&self.gl_library);
+                self.gl_surface.swap_buffers(&self.gl_context)
+                    .expect("failed to swap buffers");
+            }
             WindowEvent::CloseRequested => {
-                self.renderer.destroy(&self.glow_context);
+                self.renderer.destroy(&self.gl_library);
                 event_loop.exit();
             }
             _ => ()
@@ -171,69 +299,18 @@ impl ApplicationHandler for Application {
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         match cause {
-            StartCause::ResumeTimeReached { requested_resume, .. } => {
-                self.renderer.update(&self.glow_context, self.capture_data.lock().unwrap().as_ref());
-                self.window.request_redraw();
-                event_loop.set_control_flow(ControlFlow::WaitUntil(requested_resume +
-                    Duration::from_millis(15)));
+            StartCause::ResumeTimeReached { .. } => {
+                if self.renderer.poll() {
+                    self.window.request_redraw();
+                }
+                // The `winit` documentation recommends `Poll`, but if no waveforms are acquired,
+                // this results in a busy loop waiting on `self.renderer.poll()`, pegging a core.
+                // A 5 ms delay should be enough for even a 200 Hz display.
+                event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(5)));
             }
             _ => ()
         }
     }
-}
-
-fn sampler(capture_data: Arc<Mutex<Vec<i8>>>) -> thunderscope::Result<()> {
-    use std::io::Read;
-
-    thunderscope::Device::with(|device| {
-        device.startup()?;
-        device.configure(&thunderscope::DeviceParameters::derive(
-            &thunderscope::DeviceCalibration::default(),
-            &thunderscope::DeviceConfiguration {
-                channels: [Some(thunderscope::ChannelConfiguration {
-                    ..Default::default()
-                }), None, None, None]
-            }))?;
-
-        let mut reader = device.stream_data();
-        let mut buffer = thunderscope::RingBuffer::new(1 << 23)?;
-        let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
-        let mut cursor = buffer.cursor();
-        let mut available = 0;
-        loop {
-            // refill buffer
-            let refill_by = buffer.len() - available;
-            available += buffer.append(refill_by, |slice| reader.read(slice))?;
-            log::debug!("sampler: refilled buffer for trigger by {} bytes ({} available)",
-                refill_by, available);
-            // find trigger
-            let data = buffer.read(cursor, available);
-            let (processed, edge) = trigger.find(data, TRIGGER_EDGE);
-            log::debug!("sampler: trigger consumed {} bytes ({} available)",
-                processed, available);
-            cursor += processed;
-            available -= processed;
-            if let Some(edge) = edge {
-                // check if we need to capture more
-                if available < SAMPLE_COUNT {
-                    let refill_by = SAMPLE_COUNT - available;
-                    available += buffer.append(refill_by, |slice| reader.read(slice))?;
-                    log::debug!("sampler: refilled buffer for capture by {} bytes ({} available)",
-                        refill_by, available);
-                }
-                // display data
-                debug_assert!(available >= SAMPLE_COUNT);
-                if let Ok(mut display_buffer) = capture_data.try_lock() {
-                    display_buffer.copy_from_slice(buffer.read(cursor, SAMPLE_COUNT));
-                    log::debug!("sampler: captured waveform for {:?} edge", edge);
-                }
-                cursor += SAMPLE_COUNT;
-                available -= SAMPLE_COUNT;
-                // reset trigger
-                trigger.reset();
-            }
-        }
-    })
 }
 
 fn main() {
@@ -275,35 +352,32 @@ fn main() {
     };
     let gl_context = gl_context.make_current(&gl_surface)
         .expect("failed to make GL context current");
-    let glow_context = unsafe {
+    let gl_library = unsafe {
         GlowContext::from_loader_function_cstr(|func|
             gl_config.display().get_proc_address(func).cast())
     };
-    // start the acquisition
-    let mut capture_data = Vec::new();
-    capture_data.resize(SAMPLE_COUNT, 0);
-    let capture_data = Arc::new(Mutex::new(capture_data));
-    let _acquisition_thread = {
-        let capture_data = capture_data.clone();
-        thread::spawn(move ||
-            sampler(Arc::clone(&capture_data))
-                .expect("failed to acquire sample data"));
-    };
-    //
+    // create communication channels and prime the bucket brigade
+    let (sampler_to_renderer_send, sampler_to_renderer_recv) = channel();
+    let (renderer_to_sampler_send, renderer_to_sampler_recv) = channel();
+    for _ in 0..3 {
+        let waveform = Waveform::new(SAMPLE_COUNT)
+            .expect("failed to create a ring buffer for acquisition");
+        renderer_to_sampler_send.send(waveform).unwrap();
+    }
+    // set up the acquisition and processing pipeline
+    let instrument = thunderscope::Device::new().expect("failed to open instrument");
+    let sampler = Sampler::new(instrument, renderer_to_sampler_recv, sampler_to_renderer_send);
+    let renderer = Renderer::new(&gl_library, sampler_to_renderer_recv, renderer_to_sampler_send);
     // create the application
-    let renderer = Renderer::new(&glow_context);
-    // let data = Vec::from_iter((0..SAMPLE_COUNT).map(|n|
-    //     ((n as f32 * std::f32::consts::PI / 3.5).sin() * 100.0) as i8));
-    // renderer.update(&glow_context, data.as_ref());
     let mut application = Application {
-        capture_data,
         gl_context,
         gl_surface,
-        glow_context,
+        gl_library,
         renderer,
         window
     };
     // run the application
+    sampler.start();
     event_loop.set_control_flow(ControlFlow::wait_duration(Duration::ZERO));
     event_loop.run_app(&mut application)
         .expect("failed to run application");

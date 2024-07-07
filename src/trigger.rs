@@ -81,10 +81,10 @@ impl Trigger {
         // `RUSTFLAGS="-C target-cpu=native"` because the `wide` crate will only use 128-bit
         // registers if AVX2 wasn't detected at compile time, but the difference is quite small.
         // https://github.com/Lokathor/wide/blob/d94cbeadceacb0d9ebe5f18caedf933e0d4398ad/src/i8x32_.rs#L3-L13
-        if is_x86_feature_detected!("avx2") {
+        if !cfg!(test) && is_x86_feature_detected!("avx2") {
             // SAFETY: The AVX2 function is called only if AVX2 is available, checked above.
             unsafe { self.scan_avx2(samples, filter) }
-        } else if is_x86_feature_detected!("avx") {
+        } else if !cfg!(test) && is_x86_feature_detected!("avx") {
             // SAFETY: The AVX function is called only if AVX is available, checked above.
             unsafe { self.scan_avx(samples, filter) }
         } else {
