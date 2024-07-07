@@ -63,7 +63,7 @@ impl Sampler {
         Sampler { instrument, waveform_recv, waveform_send }
     }
 
-    pub fn start(mut self) -> std::thread::JoinHandle<thunderscope::Result<()>> {
+    pub fn run(mut self) -> std::thread::JoinHandle<thunderscope::Result<()>> {
         thread::spawn(move || {
             self.instrument.startup()?;
             self.instrument.configure(&thunderscope::DeviceParameters::derive(
@@ -73,13 +73,13 @@ impl Sampler {
                         ..Default::default()
                     }), None, None, None]
                 }))?;
-            let result = self.run();
+            self.trigger_and_capture()?;
             self.instrument.shutdown()?;
-            Ok(result.expect("acquisition failed"))
+            Ok(())
         })
     }
 
-    fn run(&mut self) -> thunderscope::Result<()> {
+    fn trigger_and_capture(&mut self) -> thunderscope::Result<()> {
         let mut reader = self.instrument.stream_data();
         let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
         // prime the queue
@@ -115,17 +115,23 @@ impl Sampler {
                 log::debug!("sampler: captured waveform for {:?} edge ({}+{})",
                     edge, cursor.into_inner(), SAMPLE_COUNT);
                 match self.waveform_recv.try_recv() {
-                    Err(_) => log::debug!("sampler: discarded waveform"),
                     Ok(new_waveform) => {
                         self.waveform_send.send(waveform).expect("failed to send waveform");
                         log::debug!("sampler: submitted waveform");
                         waveform = new_waveform;
+                    }
+                    Err(TryRecvError::Empty) =>
+                        log::debug!("sampler: discarded waveform"),
+                    Err(TryRecvError::Disconnected) => {
+                        log::debug!("sampler: done");
+                        break
                     }
                 }
                 // reset trigger to resynchronize its state
                 trigger.reset();
             }
         }
+        Ok(())
     }
 }
 
@@ -188,10 +194,7 @@ impl Renderer {
         match self.waveform_recv.try_recv() {
             err @ Err(TryRecvError::Disconnected) =>
                 panic!("renderer: failed to receive waveform: {:?}", err),
-            Err(TryRecvError::Empty) => {
-                log::debug!("renderer: retained waveform");
-                false
-            }
+            Err(TryRecvError::Empty) => false,
             Ok(new_waveform) => {
                 log::debug!("renderer: acquired waveform");
                 if let Some(old_waveform) = self.waveform.replace(new_waveform) {
@@ -321,6 +324,7 @@ fn main() {
         .init();
     // create a window
     let event_loop = EventLoop::new().expect("failed to create event loop");
+    event_loop.set_control_flow(ControlFlow::wait_duration(Duration::ZERO));
     let attributes = Window::default_attributes()
         .with_title("ThunderScope");
     let config_template = ConfigTemplateBuilder::new()
@@ -368,17 +372,17 @@ fn main() {
     let instrument = thunderscope::Device::new().expect("failed to open instrument");
     let sampler = Sampler::new(instrument, renderer_to_sampler_recv, sampler_to_renderer_send);
     let renderer = Renderer::new(&gl_library, sampler_to_renderer_recv, renderer_to_sampler_send);
-    // create the application
-    let mut application = Application {
+    // run the application
+    let sampler_thread = sampler.run();
+    event_loop.run_app(&mut Application {
         gl_context,
         gl_surface,
         gl_library,
         renderer,
         window
-    };
-    // run the application
-    sampler.start();
-    event_loop.set_control_flow(ControlFlow::wait_duration(Duration::ZERO));
-    event_loop.run_app(&mut application)
-        .expect("failed to run application");
+    }).expect("failed to run application");
+    // clean up
+    sampler_thread.join()
+        .expect("acquisition thread panicked")
+        .expect("acquisition failed");
 }
