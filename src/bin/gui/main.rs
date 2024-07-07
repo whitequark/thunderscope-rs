@@ -1,17 +1,15 @@
 use std::io::Read;
 use std::num::NonZeroU32;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::event::{StartCause, WindowEvent};
-use winit::window::{Window, WindowId};
-use winit::raw_window_handle::HasWindowHandle;
-use winit::application::ApplicationHandler;
+use raw_window_handle::HasRawWindowHandle;
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget};
+use winit::event::{Event, StartCause, WindowEvent};
+use winit::window::{Window, WindowBuilder};
 
 use glutin_winit::DisplayBuilder;
-
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{Version, ContextApi, ContextAttributesBuilder};
 use glutin::context::{NotCurrentGlContext, PossiblyCurrentContext};
@@ -44,7 +42,7 @@ impl Waveform {
     }
 }
 
-struct Sampler {
+struct WaveformSampler {
     // Sampler does not allocate the waveform buffers. It relies on a pair of channels acting like
     // a bucket brigade: any received `Waveform` objects are filled in with captures and sent for
     // further processing. Eventually the `Waveform` object comes back from the processing engine,
@@ -54,13 +52,13 @@ struct Sampler {
     waveform_send: Sender<Waveform>,
 }
 
-impl Sampler {
+impl WaveformSampler {
     pub fn new(
         instrument: thunderscope::Device,
         waveform_recv: Receiver<Waveform>,
         waveform_send: Sender<Waveform>
-    ) -> Sampler {
-        Sampler { instrument, waveform_recv, waveform_send }
+    ) -> WaveformSampler {
+        WaveformSampler { instrument, waveform_recv, waveform_send }
     }
 
     pub fn run(mut self) -> std::thread::JoinHandle<thunderscope::Result<()>> {
@@ -86,16 +84,15 @@ impl Sampler {
         let mut waveform = self.waveform_recv.recv().expect("failed to receive waveform");
         loop {
             waveform.capture = None;
-            let buffer = &mut waveform.buffer;
-            let mut cursor = buffer.cursor();
+            let mut cursor = waveform.buffer.cursor();
             let mut available = 0;
             // refill buffer
-            let refill_by = buffer.len() - available;
-            available += buffer.append(refill_by, |slice| reader.read(slice))?;
+            let refill_by = waveform.buffer.len() - available;
+            available += waveform.buffer.append(refill_by, |slice| reader.read(slice))?;
             log::debug!("sampler: refilled buffer for trigger by {} bytes ({} available)",
                 refill_by, available);
             // find trigger
-            let data = buffer.read(cursor, available);
+            let data = waveform.buffer.read(cursor, available);
             let (processed, edge) = trigger.find(data, TRIGGER_EDGE);
             cursor += processed;
             available -= processed;
@@ -105,7 +102,7 @@ impl Sampler {
                 // check if we need to capture more
                 if available < SAMPLE_COUNT {
                     let refill_by = SAMPLE_COUNT - available;
-                    available += buffer.append(refill_by, |slice| reader.read(slice))?;
+                    available += waveform.buffer.append(refill_by, |slice| reader.read(slice))?;
                     debug_assert!(available >= SAMPLE_COUNT);
                     log::debug!("sampler: refilled buffer for capture by {} bytes ({} available)",
                         refill_by, available);
@@ -135,16 +132,16 @@ impl Sampler {
     }
 }
 
-struct Renderer {
+struct WaveformRenderer {
     program: <glow::Context as HasContext>::Program,
     vertex_array: <glow::Context as HasContext>::VertexArray,
     sample_array: <glow::Context as HasContext>::Buffer,
     waveform_recv: Receiver<Waveform>,
     waveform_send: Sender<Waveform>,
-    waveform: Option<Waveform>
+    current: Option<Waveform>,
 }
 
-impl Renderer {
+impl WaveformRenderer {
     pub fn new(
         gl: &glow::Context,
         waveform_recv: Receiver<Waveform>,
@@ -185,7 +182,7 @@ impl Renderer {
                 sample_array: data_array,
                 waveform_recv,
                 waveform_send,
-                waveform: None
+                current: None
             }
         }
     }
@@ -197,7 +194,7 @@ impl Renderer {
             Err(TryRecvError::Empty) => false,
             Ok(new_waveform) => {
                 log::debug!("renderer: acquired waveform");
-                if let Some(old_waveform) = self.waveform.replace(new_waveform) {
+                if let Some(old_waveform) = self.current.replace(new_waveform) {
                     self.waveform_send.send(old_waveform).expect("failed to return waveform");
                 }
                 true
@@ -215,10 +212,14 @@ impl Renderer {
     }
 
     pub fn render(&mut self, gl: &glow::Context) {
-        let Some(samples) = self.waveform.as_ref()
-            .and_then(|wfm| wfm.capture_data())
-            .map(|data| bytemuck::cast_slice(data)) else { return };
         unsafe {
+            gl.clear_color(0.1, 0.0, 0.1, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+
+            let Some(samples) = self.current.as_ref()
+                .and_then(|waveform| waveform.capture_data())
+                .map(|data| bytemuck::cast_slice(data)) else { return };
+
             let draw_lines_loc = gl.get_uniform_location(self.program, "draw_lines");
             let channel_color_loc = gl.get_uniform_location(self.program, "channel_color");
             let sample_count_loc = gl.get_uniform_location(self.program, "sample_count");
@@ -264,54 +265,71 @@ struct Application {
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
     gl_library: GlowContext,
-    renderer: Renderer,
+    wfm_renderer: WaveformRenderer,
+    imgui_context: imgui::Context,
+    imgui_platform: imgui_winit_support::WinitPlatform,
+    imgui_texture_map: imgui_glow_renderer::SimpleTextureMap,
+    imgui_renderer: imgui_glow_renderer::Renderer,
     window: Window,
 }
 
-impl ApplicationHandler for Application {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop,
-            _window_id: WindowId, event: WindowEvent) {
+impl Application {
+    fn process_event<T>(&mut self, event: Event<T>, window_target: &EventLoopWindowTarget<T>) {
         match event {
-            WindowEvent::Resized(size) if size.width != 0 && size.height != 0 => {
-                self.renderer.resize(&self.gl_library, size.width, size.height);
+            Event::NewEvents(StartCause::ResumeTimeReached { requested_resume, .. }) => {
+                // handle waveforms
+                if self.wfm_renderer.poll() {
+                    self.window.request_redraw();
+                }
+                // handle UI
+                self.imgui_context.io_mut().update_delta_time(
+                    Instant::now().duration_since(requested_resume));
+                self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), &self.window)
+                    .expect("failed to prepare UI frame");
+                // The `winit` documentation recommends `Poll`, but if no waveforms are acquired,
+                // this results in a busy loop waiting on `self.renderer.poll()`, pegging a core.
+                // A 5 ms delay should be enough for even a 200 Hz display.
+                window_target.set_control_flow(
+                    ControlFlow::wait_duration(Duration::from_millis(5)));
+            }
+            Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
+                self.window.pre_present_notify();
+                // handle waveforms
+                self.wfm_renderer.render(&self.gl_library);
+                // handle UI
+                let ui = self.imgui_context.frame();
+                ui.show_demo_window(&mut true);
+                self.imgui_platform.prepare_render(ui, &self.window);
+                let draw_list = self.imgui_context.render();
+                self.imgui_renderer.render(&self.gl_library, &self.imgui_texture_map, &draw_list)
+                    .expect("failed to render UI");
+                // handle OpenGL
+                self.gl_surface.swap_buffers(&self.gl_context)
+                    .expect("failed to swap buffers");
+            }
+            Event::WindowEvent { event: WindowEvent::Resized(size), .. }
+                    if size.width != 0 && size.height != 0 => {
+                // handle waveforms
+                self.wfm_renderer.resize(&self.gl_library, size.width, size.height);
+                // handle UI
+                self.imgui_platform.handle_event(self.imgui_context.io_mut(), &self.window, &event);
+                // handle OpenGL
                 self.gl_surface.resize(&self.gl_context,
                     NonZeroU32::new(size.width).unwrap(),
                     NonZeroU32::new(size.height).unwrap(),
                 );
             }
-            WindowEvent::RedrawRequested => {
-                self.window.pre_present_notify();
-                let gl = &self.gl_library;
-                unsafe {
-                    gl.clear_color(0.1, 0.0, 0.1, 1.0);
-                    gl.clear(glow::COLOR_BUFFER_BIT);
-                }
-                self.renderer.render(&self.gl_library);
-                self.gl_surface.swap_buffers(&self.gl_context)
-                    .expect("failed to swap buffers");
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                window_target.exit();
             }
-            WindowEvent::CloseRequested => {
-                self.renderer.destroy(&self.gl_library);
-                event_loop.exit();
+            Event::LoopExiting => {
+                self.wfm_renderer.destroy(&self.gl_library);
+                self.imgui_renderer.destroy(&self.gl_library);
             }
-            _ => ()
-        }
-    }
-
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        match cause {
-            StartCause::ResumeTimeReached { .. } => {
-                if self.renderer.poll() {
-                    self.window.request_redraw();
-                }
-                // The `winit` documentation recommends `Poll`, but if no waveforms are acquired,
-                // this results in a busy loop waiting on `self.renderer.poll()`, pegging a core.
-                // A 5 ms delay should be enough for even a 200 Hz display.
-                event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(5)));
+            event => {
+                self.imgui_platform.handle_event(self.imgui_context.io_mut(), &self.window, &event);
+                self.window.request_redraw();
             }
-            _ => ()
         }
     }
 }
@@ -325,28 +343,27 @@ fn main() {
     // create a window
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::wait_duration(Duration::ZERO));
-    let attributes = Window::default_attributes()
+    let window_builder = WindowBuilder::new()
         .with_title("ThunderScope");
-    let config_template = ConfigTemplateBuilder::new()
+    let config_template_builder = ConfigTemplateBuilder::new()
         .prefer_hardware_accelerated(Some(true));
     let (window, gl_config) = DisplayBuilder::new()
-        .with_window_attributes(Some(attributes))
-        .build(&event_loop, config_template, |mut configs|
+        .with_window_builder(Some(window_builder))
+        .build(&event_loop, config_template_builder, |mut configs|
             configs.next().expect("no GL configurations available"))
         .expect("failed to create window");
     let window = window.unwrap();
-    let window_handle = window.window_handle().expect("window has no handle");
     let (width, height) = window.inner_size().into();
     // create an OpenGL context
     let context_attributes = ContextAttributesBuilder::new()
         .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
-        .build(Some(window_handle.into()));
+        .build(Some(window.raw_window_handle()));
     let gl_context = unsafe {
         gl_config.display().create_context(&gl_config, &context_attributes)
             .expect("failed to create GL context")
     };
     let surface_attributes = SurfaceAttributesBuilder::<WindowSurface>::new()
-        .build(window_handle.into(),
+        .build(window.raw_window_handle(),
             NonZeroU32::new(width).unwrap(),
             NonZeroU32::new(height).unwrap(),
         );
@@ -360,6 +377,27 @@ fn main() {
         GlowContext::from_loader_function_cstr(|func|
             gl_config.display().get_proc_address(func).cast())
     };
+    // create an ImGui context and connect it to the window
+    let mut imgui_context = imgui::Context::create();
+    imgui_context.set_ini_filename(None); // disable ini autosaving
+    let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
+    let dpi_scale = window.scale_factor() as f32;
+    imgui_platform.attach_window(imgui_context.io_mut(), &window,
+        imgui_winit_support::HiDpiMode::Locked(1.0));
+    imgui_context.fonts().add_font(&[
+        imgui::FontSource::TtfData {
+            data: include_bytes!("DejaVuSansMono.ttf"),
+            size_pixels: 18.0 * dpi_scale,
+            config: Some(imgui::FontConfig {
+                ..Default::default()
+            })
+        }
+    ]);
+    imgui_context.style_mut().scale_all_sizes(dpi_scale);
+    let mut imgui_texture_map = imgui_glow_renderer::SimpleTextureMap::default();
+    let imgui_renderer = imgui_glow_renderer::Renderer::initialize(&gl_library,
+            &mut imgui_context, &mut imgui_texture_map, /*output_srgb=*/true)
+        .expect("failed to create UI renderer");
     // create communication channels and prime the bucket brigade
     let (sampler_to_renderer_send, sampler_to_renderer_recv) = channel();
     let (renderer_to_sampler_send, renderer_to_sampler_recv) = channel();
@@ -369,18 +407,29 @@ fn main() {
         renderer_to_sampler_send.send(waveform).unwrap();
     }
     // set up the acquisition and processing pipeline
-    let instrument = thunderscope::Device::new().expect("failed to open instrument");
-    let sampler = Sampler::new(instrument, renderer_to_sampler_recv, sampler_to_renderer_send);
-    let renderer = Renderer::new(&gl_library, sampler_to_renderer_recv, renderer_to_sampler_send);
+    let instrument = thunderscope::Device::new()
+        .expect("failed to open instrument");
+    let sampler = WaveformSampler::new(instrument,
+        renderer_to_sampler_recv, sampler_to_renderer_send);
+    let wfm_renderer = WaveformRenderer::new(&gl_library,
+        sampler_to_renderer_recv, renderer_to_sampler_send);
     // run the application
     let sampler_thread = sampler.run();
-    event_loop.run_app(&mut Application {
-        gl_context,
-        gl_surface,
-        gl_library,
-        renderer,
-        window
-    }).expect("failed to run application");
+    {
+        let mut application = Application {
+            gl_context,
+            gl_surface,
+            gl_library,
+            wfm_renderer,
+            imgui_context,
+            imgui_platform,
+            imgui_texture_map,
+            imgui_renderer,
+            window
+        };
+        event_loop.run(|event, window_target|
+            application.process_event(event, window_target))
+    }.expect("failed to run application");
     // clean up
     sampler_thread.join()
         .expect("acquisition thread panicked")
