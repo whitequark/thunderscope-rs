@@ -542,8 +542,7 @@ dependencies = [
 [[package]]
 name = "imgui"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8addafa5cecf0515812226e806913814e02ce38d10215778082af5174abe5669"
+source = "git+https://github.com/whitequark/imgui-rs?branch=imgui-1.90.1#bcb72e6cfe44a7e6bdbf6d0790badce679093581"
 dependencies = [
  "bitflags 1.3.2",
  "cfg-if",
@@ -555,8 +554,7 @@ dependencies = [
 [[package]]
 name = "imgui-glow-renderer"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b577341b903dafa5da85f512b922624297c2556ff5c63bca737e7a73660fec4"
+source = "git+https://github.com/whitequark/imgui-rs?branch=imgui-1.90.1#bcb72e6cfe44a7e6bdbf6d0790badce679093581"
 dependencies = [
  "glow",
  "imgui",
@@ -566,8 +564,7 @@ dependencies = [
 [[package]]
 name = "imgui-sys"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ead193f9f4b60398e8b8f4ab1483e2321640d87aeebdaa3e5f44c55633ccd804"
+source = "git+https://github.com/whitequark/imgui-rs?branch=imgui-1.90.1#bcb72e6cfe44a7e6bdbf6d0790badce679093581"
 dependencies = [
  "cc",
  "cfg-if",
@@ -578,8 +575,7 @@ dependencies = [
 [[package]]
 name = "imgui-winit-support"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3c00d50ebf207505ea6bc9a5cdafb33c1d14a8fe854fff1fa3542f013f3952"
+source = "git+https://github.com/whitequark/imgui-rs?branch=imgui-1.90.1#bcb72e6cfe44a7e6bdbf6d0790badce679093581"
 dependencies = [
  "imgui",
  "winit",

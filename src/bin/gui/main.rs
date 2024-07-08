@@ -422,17 +422,18 @@ fn main() {
     imgui_context.set_ini_filename(None); // disable ini autosaving
     let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
     imgui_platform.attach_window(imgui_context.io_mut(), &window,
-        imgui_winit_support::HiDpiMode::Locked(1.0));
+        imgui_winit_support::HiDpiMode::Locked(scale_factor));
     imgui_context.fonts().add_font(&[
         imgui::FontSource::TtfData {
             data: include_bytes!("DejaVuSansMono.ttf"),
-            size_pixels: 18.0 * scale_factor as f32,
+            size_pixels: 18.0,
             config: Some(imgui::FontConfig {
+                rasterizer_density: scale_factor as f32,
+                oversample_h: 1,
                 ..Default::default()
             })
         }
     ]);
-    imgui_context.style_mut().scale_all_sizes(scale_factor as f32);
     let mut imgui_texture_map = imgui_glow_renderer::SimpleTextureMap::default();
     let imgui_renderer = imgui_glow_renderer::Renderer::initialize(&gl_library,
             &mut imgui_context, &mut imgui_texture_map, /*output_srgb=*/true)
