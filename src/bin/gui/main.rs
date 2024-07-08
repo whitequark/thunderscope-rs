@@ -440,7 +440,7 @@ fn main() {
     // create communication channels and prime the bucket brigade
     let (sampler_to_renderer_send, sampler_to_renderer_recv) = channel();
     let (renderer_to_sampler_send, renderer_to_sampler_recv) = channel();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let waveform = Waveform::new(SAMPLE_COUNT)
             .expect("failed to create a ring buffer for acquisition");
         renderer_to_sampler_send.send(waveform).unwrap();
