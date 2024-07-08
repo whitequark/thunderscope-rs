@@ -33,7 +33,8 @@ imgui-winit-support = { version = "0.12", optional = true }
 imgui-glow-renderer = { version = "0.12", optional = true }
 
 [features]
-default = ["gui"]
+default = ["gui", "hardware"]
+hardware = []
 gui = [
     "dep:raw-window-handle",
     "dep:winit",

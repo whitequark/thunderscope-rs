@@ -18,10 +18,13 @@ pub struct Device {
 
 impl Device {
     pub fn new() -> Result<Device> {
-        // FIXME: do this better
-        #[cfg(any(target_os = "linux"))]
-        let driver = Driver::new("/dev/xdma0")?;
-        Ok(Device { driver })
+        if cfg!(all(feature = "hardware", target_os = "linux")) {
+            // FIXME: do this better
+            Ok(Device { driver: Driver::new("/dev/xdma0")? })
+        } else {
+            log::error!("this platform does not implement a hardware driver");
+            Err(crate::Error::Unsupported)
+        }
     }
 
     pub fn with<F, R>(f: F) -> Result<R>

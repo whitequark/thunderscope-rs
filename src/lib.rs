@@ -10,6 +10,7 @@ mod capture;
 
 #[derive(Debug)]
 pub enum Error {
+    Unsupported,
     NotFound,
     Xdma(std::io::Error),
     Vmap(vmap::Error),
@@ -19,6 +20,8 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::Unsupported =>
+                write!(f, "platform not supported"),
             Self::NotFound =>
                 write!(f, "device not connected"),
             Self::Xdma(error) =>
@@ -59,6 +62,8 @@ impl From<std::io::Error> for Error {
 impl From<Error> for std::io::Error {
     fn from(error: Error) -> Self {
         match error {
+            Error::Unsupported =>
+                Self::new(std::io::ErrorKind::Unsupported, error),
             Error::NotFound => // converted from std::io::Error in first place
                 Self::new(std::io::ErrorKind::NotFound, error),
             Error::Xdma(error) => error,

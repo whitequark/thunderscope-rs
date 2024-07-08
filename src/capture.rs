@@ -14,7 +14,7 @@ unsafe impl Send for RingSlice {}
 
 impl RingSlice {
     pub fn new(min_size: usize) -> Result<RingSlice> {
-        let len = min_size.next_multiple_of(vmap::page_size());
+        let len = min_size.next_multiple_of(vmap::allocation_size());
         // `pread()` gets unhappy if you read into the same page twice from both ends.
         let len = len.max(vmap::page_size() * 2);
         let ptr = vmap::os::map_ring(len)?;

@@ -1,7 +1,11 @@
 use crate::Result;
 
-#[cfg(any(target_os = "linux"))]
+#[cfg(all(feature = "hardware", any(target_os = "linux")))]
 #[path = "linux.rs"]
+mod imp;
+
+#[cfg(not(all(feature = "hardware", any(target_os = "linux"))))]
+#[path = "stub.rs"]
 mod imp;
 
 #[derive(Debug)]

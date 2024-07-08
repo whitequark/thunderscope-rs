@@ -1,10 +1,10 @@
-use std::io::Read;
 use std::num::NonZeroU32;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 
 use raw_window_handle::HasRawWindowHandle;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget};
 use winit::event::{Event, StartCause, WindowEvent};
 use winit::window::{Window, WindowBuilder};
@@ -24,6 +24,29 @@ const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
 const TRIGGER_LEVEL: i8 = 50;
 const SAMPLE_COUNT: usize = 128_000;
 const RENDER_LINES: bool = true;
+
+struct SineGenerator {
+    phase: f32,
+    increment: f32,
+}
+
+impl SineGenerator {
+    pub fn new(increment: f32) -> SineGenerator {
+        SineGenerator { phase: 0.0, increment }
+    }
+}
+
+impl std::io::Read for SineGenerator {
+    fn read(&mut self, data: &mut [u8]) -> std::io::Result<usize> {
+        for sample in data.iter_mut() {
+            *sample = (self.phase.sin() * 100.0) as i8 as u8;
+            self.phase = (self.phase + self.increment) % (2.0 * std::f32::consts::PI);
+        }
+        // simulate 1 GS/s capture rate
+        std::thread::sleep(Duration::from_nanos(1) * (data.len() as u32));
+        Ok(data.len())
+    }
+}
 
 #[derive(Debug)]
 struct Waveform {
@@ -47,52 +70,69 @@ struct WaveformSampler {
     // a bucket brigade: any received `Waveform` objects are filled in with captures and sent for
     // further processing. Eventually the `Waveform` object comes back from the processing engine,
     // and the closed cycle continues.
-    instrument: thunderscope::Device,
     waveform_recv: Receiver<Waveform>,
     waveform_send: Sender<Waveform>,
 }
 
 impl WaveformSampler {
     pub fn new(
-        instrument: thunderscope::Device,
         waveform_recv: Receiver<Waveform>,
         waveform_send: Sender<Waveform>
     ) -> WaveformSampler {
-        WaveformSampler { instrument, waveform_recv, waveform_send }
+        WaveformSampler { waveform_recv, waveform_send }
     }
 
-    pub fn run(mut self) -> std::thread::JoinHandle<thunderscope::Result<()>> {
+    pub fn run(mut self, instrument: Option<thunderscope::Device>)
+            -> std::thread::JoinHandle<thunderscope::Result<()>> {
         thread::spawn(move || {
-            self.instrument.startup()?;
-            self.instrument.configure(&thunderscope::DeviceParameters::derive(
-                &thunderscope::DeviceCalibration::default(),
-                &thunderscope::DeviceConfiguration {
-                    channels: [Some(thunderscope::ChannelConfiguration {
-                        ..Default::default()
-                    }), None, None, None]
-                }))?;
-            self.trigger_and_capture()?;
-            self.instrument.shutdown()?;
+            match instrument {
+                None =>
+                    self.trigger_and_capture(SineGenerator::new(12.0 / SAMPLE_COUNT as f32))?,
+                Some(mut instrument) => {
+                    instrument.startup()?;
+                    instrument.configure(&thunderscope::DeviceParameters::derive(
+                        &thunderscope::DeviceCalibration::default(),
+                        &thunderscope::DeviceConfiguration {
+                            channels: [Some(thunderscope::ChannelConfiguration {
+                                ..Default::default()
+                            }), None, None, None]
+                        }))?;
+                    self.trigger_and_capture(instrument.stream_data())?;
+                    instrument.shutdown()?;
+                }
+            }
             Ok(())
         })
     }
 
-    fn trigger_and_capture(&mut self) -> thunderscope::Result<()> {
-        let mut reader = self.instrument.stream_data();
+    fn trigger_and_capture<R>(&mut self, mut reader: R) -> thunderscope::Result<()>
+            where R: std::io::Read {
+        let mut wfm_active = self.waveform_recv.recv().expect("failed to receive waveform");
+        let mut wfm_standby = None;
         let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
-        // prime the queue
-        let mut waveform = self.waveform_recv.recv().expect("failed to receive waveform");
         loop {
-            waveform.capture = None;
-            let mut cursor = waveform.buffer.cursor();
+            // try to acquire a standby waveform buffer
+            // at least one buffer must be available at all times to read samples into, so until
+            // a standby buffer is available, the active buffer will not be submitted
+            match self.waveform_recv.try_recv() {
+                Ok(waveform) => wfm_standby = Some(waveform),
+                Err(TryRecvError::Empty) => (),
+                Err(TryRecvError::Disconnected) => {
+                    log::debug!("sampler: done");
+                    break
+                }
+            }
+            // set up capturing in active buffer
+            wfm_active.capture = None;
+            let mut cursor = wfm_active.buffer.cursor();
             let mut available = 0;
             // refill buffer
-            let refill_by = waveform.buffer.len() - available;
-            available += waveform.buffer.append(refill_by, |slice| reader.read(slice))?;
+            let refill_by = wfm_active.buffer.len() - available;
+            available += wfm_active.buffer.append(refill_by, |slice| reader.read(slice))?;
             log::debug!("sampler: refilled buffer for trigger by {} bytes ({} available)",
                 refill_by, available);
             // find trigger
-            let data = waveform.buffer.read(cursor, available);
+            let data = wfm_active.buffer.read(cursor, available);
             let (processed, edge) = trigger.find(data, TRIGGER_EDGE);
             cursor += processed;
             available -= processed;
@@ -102,27 +142,21 @@ impl WaveformSampler {
                 // check if we need to capture more
                 if available < SAMPLE_COUNT {
                     let refill_by = SAMPLE_COUNT - available;
-                    available += waveform.buffer.append(refill_by, |slice| reader.read(slice))?;
+                    available += wfm_active.buffer.append(refill_by, |slice| reader.read(slice))?;
                     debug_assert!(available >= SAMPLE_COUNT);
                     log::debug!("sampler: refilled buffer for capture by {} bytes ({} available)",
                         refill_by, available);
                 }
                 // submit data for processing
-                waveform.capture = Some((cursor, SAMPLE_COUNT));
+                wfm_active.capture = Some((cursor, SAMPLE_COUNT));
                 log::debug!("sampler: captured waveform for {:?} edge ({}+{})",
                     edge, cursor.into_inner(), SAMPLE_COUNT);
-                match self.waveform_recv.try_recv() {
-                    Ok(new_waveform) => {
-                        self.waveform_send.send(waveform).expect("failed to send waveform");
-                        log::debug!("sampler: submitted waveform");
-                        waveform = new_waveform;
-                    }
-                    Err(TryRecvError::Empty) =>
-                        log::debug!("sampler: discarded waveform"),
-                    Err(TryRecvError::Disconnected) => {
-                        log::debug!("sampler: done");
-                        break
-                    }
+                if let Some(next_waveform) = wfm_standby.take() {
+                    self.waveform_send.send(wfm_active).expect("failed to send waveform");
+                    log::debug!("sampler: submitted waveform");
+                    wfm_active = next_waveform;
+                } else {
+                    log::debug!("sampler: discarded waveform");
                 }
                 // reset trigger to resynchronize its state
                 trigger.reset();
@@ -377,23 +411,28 @@ fn main() {
         GlowContext::from_loader_function_cstr(|func|
             gl_config.display().get_proc_address(func).cast())
     };
+    // configure UI for DPI awareness
+    let scale_factor = window.scale_factor();
+    log::info!("scaling UI by a factor of {:.2}×", scale_factor);
+    let window_size = LogicalSize::new(1280.0, 720.0);
+    let _ = window.request_inner_size(
+        PhysicalSize::<f64>::from_logical(window_size, scale_factor));
     // create an ImGui context and connect it to the window
     let mut imgui_context = imgui::Context::create();
     imgui_context.set_ini_filename(None); // disable ini autosaving
     let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
-    let dpi_scale = window.scale_factor() as f32;
     imgui_platform.attach_window(imgui_context.io_mut(), &window,
         imgui_winit_support::HiDpiMode::Locked(1.0));
     imgui_context.fonts().add_font(&[
         imgui::FontSource::TtfData {
             data: include_bytes!("DejaVuSansMono.ttf"),
-            size_pixels: 18.0 * dpi_scale,
+            size_pixels: 18.0 * scale_factor as f32,
             config: Some(imgui::FontConfig {
                 ..Default::default()
             })
         }
     ]);
-    imgui_context.style_mut().scale_all_sizes(dpi_scale);
+    imgui_context.style_mut().scale_all_sizes(scale_factor as f32);
     let mut imgui_texture_map = imgui_glow_renderer::SimpleTextureMap::default();
     let imgui_renderer = imgui_glow_renderer::Renderer::initialize(&gl_library,
             &mut imgui_context, &mut imgui_texture_map, /*output_srgb=*/true)
@@ -407,14 +446,14 @@ fn main() {
         renderer_to_sampler_send.send(waveform).unwrap();
     }
     // set up the acquisition and processing pipeline
-    let instrument = thunderscope::Device::new()
-        .expect("failed to open instrument");
-    let sampler = WaveformSampler::new(instrument,
+    let sampler = WaveformSampler::new(
         renderer_to_sampler_recv, sampler_to_renderer_send);
     let wfm_renderer = WaveformRenderer::new(&gl_library,
         sampler_to_renderer_recv, renderer_to_sampler_send);
+    // set up acquisition
+    let instrument = thunderscope::Device::new().ok();
+    let sampler_thread = sampler.run(instrument);
     // run the application
-    let sampler_thread = sampler.run();
     {
         let mut application = Application {
             gl_context,
@@ -430,7 +469,7 @@ fn main() {
         event_loop.run(|event, window_target|
             application.process_event(event, window_target))
     }.expect("failed to run application");
-    // clean up
+    // clean up acquisition
     sampler_thread.join()
         .expect("acquisition thread panicked")
         .expect("acquisition failed");
