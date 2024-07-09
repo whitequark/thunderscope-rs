@@ -33,6 +33,9 @@ imgui = { git = "https://github.com/whitequark/imgui-rs", branch = "imgui-1.90.1
 imgui-winit-support = { git = "https://github.com/whitequark/imgui-rs", branch = "imgui-1.90.1", optional = true }
 imgui-glow-renderer = { git = "https://github.com/whitequark/imgui-rs", branch = "imgui-1.90.1", optional = true }
 
+# [patch."https://github.com/whitequark/imgui-rs"]
+# imgui = { path = "../imgui-rs/imgui" }
+
 [features]
 default = ["gui", "hardware"]
 hardware = []

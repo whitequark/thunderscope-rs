@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicI8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -21,7 +23,7 @@ use glow::{Context as GlowContext, HasContext};
 use thunderscope::EdgeFilter;
 
 const TRIGGER_EDGE: EdgeFilter = EdgeFilter::Rising;
-const TRIGGER_LEVEL: i8 = 50;
+static TRIGGER_LEVEL: AtomicI8 = AtomicI8::new(50);
 const SAMPLE_COUNT: usize = 128_000;
 const RENDER_LINES: bool = true;
 
@@ -109,7 +111,7 @@ impl WaveformSampler {
             where R: std::io::Read {
         let mut wfm_active = self.waveform_recv.recv().expect("failed to receive waveform");
         let mut wfm_standby = None;
-        let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL, 2);
+        let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL.load(Ordering::SeqCst), 2);
         loop {
             // try to acquire a standby waveform buffer
             // at least one buffer must be available at all times to read samples into, so until
@@ -148,7 +150,7 @@ impl WaveformSampler {
                         refill_by, available);
                 }
                 // submit data for processing
-                wfm_active.capture = Some((cursor, SAMPLE_COUNT));
+                wfm_active.capture = Some((cursor - 2000, SAMPLE_COUNT));
                 log::debug!("sampler: captured waveform for {:?} edge ({}+{})",
                     edge, cursor.into_inner(), SAMPLE_COUNT);
                 if let Some(next_waveform) = wfm_standby.take() {
@@ -161,6 +163,7 @@ impl WaveformSampler {
                 // reset trigger to resynchronize its state
                 trigger.reset();
             }
+            trigger = thunderscope::Trigger::new(TRIGGER_LEVEL.load(Ordering::SeqCst), 2);
         }
         Ok(())
     }
@@ -295,6 +298,305 @@ impl WaveformRenderer {
     }
 }
 
+mod ui_style {
+    pub const FONT_DEFAULT_DATA: &[u8] = include_bytes!("DejaVuSans.ttf");
+    pub const FONT_DEFAULT_SIZE: f32 = 18.0;
+
+    pub const FONT_CONTROLS_DATA: &[u8] = include_bytes!("DejaVuSans-Bold.ttf");
+    pub const FONT_CONTROLS_SIZE: f32 = 22.0;
+
+    pub const FONT_LOGO_DATA: &[u8] = include_bytes!("DejaVuSerif.ttf");
+    pub const FONT_LOGO_SIZE: f32  = 30.0;
+
+    pub const LOGO_TEXT: &str = "ThunderScope";
+    pub const LOGO_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    pub const CONTROLS_V_MARGIN: f32 = 12.0;
+    pub const CONTROLS_H_SPACING: f32 = 14.0;
+    pub const CONTROLS_TRIGGER_WIDTH: f32 = 120.0;
+    pub const CONTROLS_RUN_STOP_WIDTH: f32 = 72.0;
+
+    pub const MARKER_FILL_COLOR: [f32; 4] = [1.0, 0.5, 0.0, 1.0];
+    pub const MARKER_LINE_COLOR: [f32; 4] = [0.8, 0.4, 0.0, 1.0];
+    pub const MARKER_TEXT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    pub const DEBUG_COLOR: [f32; 4] = [0.8, 0.0, 0.8, 1.0];
+}
+
+#[derive(Debug, PartialEq, Eq, Default)]
+struct InterfaceState {
+    trigger_clicked: bool,
+    run_stop_clicked: bool,
+}
+
+#[derive(Debug)]
+struct InterfaceRenderer {
+    controls_font: imgui::FontId,
+    logo_font: imgui::FontId,
+
+    dragging_h_marker: Cell<bool>,
+    h_marker_pos: Cell<f32>,
+
+    dragging_v_marker: Cell<bool>,
+    v_marker_pos: Cell<f32>,
+}
+
+impl InterfaceRenderer {
+    fn new(context: &mut imgui::Context, font_config: imgui::FontConfig) -> Self {
+        use imgui::*;
+
+        let ttf_font = |data, size_pixels| [
+            FontSource::TtfData { data, size_pixels, config: Some(font_config.clone()) },
+            FontSource::TtfData { data, size_pixels,
+                config: Some(FontConfig {
+                    glyph_ranges: FontGlyphRanges::from_slice(&[
+                        '↑' as u32, '↑' as u32,
+                        '↓' as u32, '↓' as u32,
+                        '⇅' as u32, '⇅' as u32,
+                        0
+                    ]),
+                    ..font_config.clone()
+                }),
+            },
+        ];
+        let _default_font = context.fonts().add_font(
+            &ttf_font(ui_style::FONT_DEFAULT_DATA, ui_style::FONT_DEFAULT_SIZE));
+        let controls_font = context.fonts().add_font(
+            &ttf_font(ui_style::FONT_CONTROLS_DATA, ui_style::FONT_CONTROLS_SIZE));
+        let logo_font = context.fonts().add_font(
+            &ttf_font(ui_style::FONT_LOGO_DATA, ui_style::FONT_LOGO_SIZE));
+        Self {
+            controls_font,
+            logo_font,
+            dragging_h_marker: Cell::new(false),
+            h_marker_pos: Cell::new(100.0),
+            dragging_v_marker: Cell::new(false),
+            v_marker_pos: Cell::new(100.0),
+        }
+    }
+
+    fn render_logo(&self, ui: &imgui::Ui) -> [f32; 2] {
+        let _t = ui.push_font(self.logo_font);
+        ui.text_colored(ui_style::LOGO_COLOR, ui_style::LOGO_TEXT);
+        ui.calc_text_size(ui_style::LOGO_TEXT)
+    }
+
+    fn render_minimap(&self, ui: &imgui::Ui, width: f32, height: f32) {
+        let minimap = ui.child_window("##minimap")
+            .size([width, height])
+            .movable(false)
+            .bring_to_front_on_focus(false);
+        minimap.build(|| {
+            let draw_list = ui.get_window_draw_list();
+            let ([x, y], [w, h]) = (ui.window_pos(), ui.window_size());
+            draw_list
+                .add_rect([x, y], [x + w, y + h], ui_style::DEBUG_COLOR)
+                .build();
+        });
+    }
+
+    fn with_controls_style<F: FnOnce() -> R, R>(&self, ui: &imgui::Ui, f: F) -> R {
+        use imgui::*;
+
+        let _t = ui.push_font(self.controls_font);
+        let _t = ui.push_style_color(StyleColor::Button,        [0.00, 0.00, 0.00, 1.00]);
+        let _t = ui.push_style_color(StyleColor::ButtonHovered, [0.20, 0.20, 0.20, 1.00]);
+        let _t = ui.push_style_color(StyleColor::ButtonActive,  [0.40, 0.40, 0.40, 1.00]);
+        let _t = ui.push_style_color(StyleColor::Border,        [0.25, 0.25, 0.25, 1.00]);
+        let _t = ui.push_style_var(StyleVar::FrameRounding(5.0));
+        let _t = ui.push_style_var(StyleVar::FrameBorderSize(2.0));
+        f()
+    }
+
+    fn render_trigger_config(&self, ui: &imgui::Ui, width: f32, height: f32) -> bool {
+        use imgui::*;
+
+        self.with_controls_style(ui, || {
+            let _t = ui.push_style_color(StyleColor::Text, [1.0, 1.0, 1.0, 1.0]);
+            ui.button_with_size("T: CH1↑", [width, height])
+        })
+    }
+
+    fn render_run_stop(&self, ui: &imgui::Ui, width: f32, height: f32) -> bool {
+        use imgui::*;
+
+        self.with_controls_style(ui, || {
+            let _t = ui.push_style_color(StyleColor::Text, [0.0, 1.0, 0.0, 1.0]);
+            ui.button_with_size("STOP", [width, height])
+        })
+    }
+
+    fn render_trigger_offset_marker(&self, ui: &imgui::Ui) {
+        let draw_list = ui.get_window_draw_list();
+
+        let text = "-50ps";
+
+        let [x, y] = [self.h_marker_pos.get(), 90.0];
+        let [wt, ht] = ui.calc_text_size(text);
+        let [wp, hp] = [wt+5.0, ht+5.0];
+        let mut marker_outline = vec![
+            [x, y],
+            [x-wp/2.0, y-5.0],
+            [x-wp/2.0, y-5.0-hp],
+            [x+wp/2.0, y-5.0-hp],
+            [x+wp/2.0, y-5.0],
+            [x, y],
+        ];
+        let color = ui_style::MARKER_FILL_COLOR;
+        if self.dragging_h_marker.get() {
+            if ui.is_mouse_down(imgui::MouseButton::Left) {
+                let [x, _] = ui.io().mouse_pos;
+                self.h_marker_pos.set(x);
+            } else {
+                self.dragging_h_marker.set(false);
+            }
+        } else if ui.is_mouse_hovering_rect([x-wp/2.0,y-5.0-hp], [x+wp/2.0,y]) {
+            if ui.is_mouse_down(imgui::MouseButton::Left) {
+                self.dragging_h_marker.set(true)
+            }
+        }
+        draw_list.add_polyline(marker_outline.clone(), color)
+            .filled(true).build();
+        marker_outline.push([x, y+400.0]);
+        draw_list.add_polyline(marker_outline, ui_style::MARKER_LINE_COLOR)
+            .thickness(1.0).build();
+        draw_list.add_text([x-wt/2.0, y-2.5-ht-5.0], ui_style::MARKER_TEXT_COLOR, text);
+    }
+
+    fn render_trigger_level_marker(&self, ui: &imgui::Ui) {
+        let draw_list = ui.get_window_draw_list();
+
+        let text = format!("{:.2}V", (TRIGGER_LEVEL.load(Ordering::SeqCst) as f32 * 5.0 / 128.0));
+
+        let [x, y] = [80.0, self.v_marker_pos.get()];
+        let [wt, ht] = ui.calc_text_size(text.as_str());
+        let [wp, hp] = [wt+5.0, ht+5.0];
+        let mut marker_outline = vec![
+            [x, y],
+            [x-5.0, y-hp/2.0],
+            [x-5.0-wp, y-hp/2.0],
+            [x-5.0-wp, y+hp/2.0],
+            [x-5.0, y+hp/2.0],
+            [x, y],
+        ];
+        let color = ui_style::MARKER_FILL_COLOR;
+        if self.dragging_v_marker.get() {
+            if ui.is_mouse_down(imgui::MouseButton::Left) {
+                let [_, y] = ui.io().mouse_pos;
+                self.v_marker_pos.set(y);
+
+                let [_, h] = ui.window_size();
+                TRIGGER_LEVEL.store((-((y-h/2.0)/h)*256.0) as i8, Ordering::SeqCst);
+            } else {
+                self.dragging_v_marker.set(false);
+            }
+        } else if ui.is_mouse_hovering_rect([x-5.0-wp, y-hp/2.0], [x, y+hp/2.0]) {
+            if ui.is_mouse_down(imgui::MouseButton::Left) {
+                self.dragging_v_marker.set(true)
+            }
+        }
+        draw_list.add_polyline(marker_outline.clone(), color)
+            .filled(true).build();
+        marker_outline.push([x+800.0, y]);
+        draw_list.add_polyline(marker_outline, ui_style::MARKER_LINE_COLOR)
+            .thickness(1.0).build();
+        draw_list.add_text([x-wt-5.0, y-ht/2.0], ui_style::MARKER_TEXT_COLOR, text.as_str());
+    }
+
+    fn render_controls(&self, ui: &imgui::Ui, state: &mut InterfaceState) {
+        use imgui::*;
+
+        let _t = ui.push_style_var(StyleVar::WindowPadding(
+            [ui_style::CONTROLS_H_SPACING, ui_style::CONTROLS_V_MARGIN]));
+        let _t = ui.window("##main")
+            .size(ui.io().display_size, Condition::Always)
+            .position([0.0, 0.0], Condition::Always)
+            .no_decoration()
+            .draw_background(false)
+            .bring_to_front_on_focus(false)
+            .begin();
+        ui.group(|| {
+            let _t = ui.push_style_var(StyleVar::ItemSpacing(
+                [ui_style::CONTROLS_H_SPACING, 0.0]));
+            let [_, logo_height] = self.render_logo(ui);
+            ui.same_line();
+            self.render_minimap(ui,
+                -(ui_style::CONTROLS_TRIGGER_WIDTH  + ui_style::CONTROLS_H_SPACING +
+                  ui_style::CONTROLS_RUN_STOP_WIDTH + ui_style::CONTROLS_H_SPACING),
+                logo_height);
+            ui.same_line();
+            state.trigger_clicked =
+                self.render_trigger_config(ui, ui_style::CONTROLS_TRIGGER_WIDTH, logo_height);
+            ui.same_line();
+            state.run_stop_clicked =
+                self.render_run_stop(ui, ui_style::CONTROLS_RUN_STOP_WIDTH, logo_height);
+
+            self.render_trigger_offset_marker(ui);
+            self.render_trigger_level_marker(ui);
+        });
+    }
+
+    fn render_trigger_config_popup(&self, ui: &imgui::Ui) {
+        use imgui::*;
+
+        unsafe {
+            sys::igSetNextWindowPos(
+                ui.mouse_pos_on_opening_current_popup().into(),
+                sys::ImGuiCond_Appearing as i32,
+                sys::ImVec2::new(1.0, 0.0));
+        };
+        ui.popup("Trigger", || {
+            use thunderscope::EdgeFilter;
+
+            for (channel, label) in ["CH1", "CH2", "CH3", "CH4"].iter().enumerate() {
+                if ui.menu_item_config(label).selected(channel == 0).build() {
+                    // FIXME
+                }
+            }
+
+            ui.separator();
+            for (edge_filter, label) in [
+                (EdgeFilter::Rising,  "↑ Rising"),
+                (EdgeFilter::Falling, "↓ Falling"),
+                (EdgeFilter::Both,    "⇅ Both"),
+            ] {
+                if ui.menu_item_config(label).selected(TRIGGER_EDGE == edge_filter).build() {
+                    // FIXME
+                }
+            }
+
+            ui.separator();
+            ui.align_text_to_frame_padding();
+            ui.text("Level");
+            ui.same_line();
+            ui.set_next_item_width(60.0);
+            ui.input_float("V##Level", &mut (TRIGGER_LEVEL.load(Ordering::SeqCst) as f32 * 5.0 / 128.0))
+                .build();
+        });
+    }
+
+    fn render(&mut self, ui: &imgui::Ui) {
+        use imgui::*;
+
+        let mut state = InterfaceState::default();
+        self.render_controls(ui, &mut state);
+
+        if state != InterfaceState::default() {
+            log::info!("{:?}", state)
+        }
+        if state.trigger_clicked {
+            ui.open_popup("Trigger");
+        }
+        self.render_trigger_config_popup(ui);
+
+        if ui.is_key_pressed(Key::Escape) {
+            std::process::exit(0);
+        }
+
+        // ui.show_demo_window(&mut true);
+    }
+}
+
 struct Application {
     gl_context: PossiblyCurrentContext,
     gl_surface: Surface<WindowSurface>,
@@ -304,6 +606,7 @@ struct Application {
     imgui_platform: imgui_winit_support::WinitPlatform,
     imgui_texture_map: imgui_glow_renderer::SimpleTextureMap,
     imgui_renderer: imgui_glow_renderer::Renderer,
+    ui_state: InterfaceRenderer,
     window: Window,
 }
 
@@ -311,11 +614,11 @@ impl Application {
     fn process_event<T>(&mut self, event: Event<T>, window_target: &EventLoopWindowTarget<T>) {
         match event {
             Event::NewEvents(StartCause::ResumeTimeReached { requested_resume, .. }) => {
-                // handle waveforms
+                // handle waveform updates
                 if self.wfm_renderer.poll() {
                     self.window.request_redraw();
                 }
-                // handle UI
+                // handle UI updates
                 self.imgui_context.io_mut().update_delta_time(
                     Instant::now().duration_since(requested_resume));
                 self.imgui_platform.prepare_frame(self.imgui_context.io_mut(), &self.window)
@@ -328,14 +631,14 @@ impl Application {
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 self.window.pre_present_notify();
-                // handle waveforms
+                // draw waveforms
                 self.wfm_renderer.render(&self.gl_library);
-                // handle UI
+                // draw UI widgets
                 let ui = self.imgui_context.frame();
-                ui.show_demo_window(&mut true);
+                self.ui_state.render(&ui);
                 self.imgui_platform.prepare_render(ui, &self.window);
-                let draw_list = self.imgui_context.render();
-                self.imgui_renderer.render(&self.gl_library, &self.imgui_texture_map, &draw_list)
+                self.imgui_renderer.render(
+                        &self.gl_library, &self.imgui_texture_map, self.imgui_context.render())
                     .expect("failed to render UI");
                 // handle OpenGL
                 self.gl_surface.swap_buffers(&self.gl_context)
@@ -343,11 +646,8 @@ impl Application {
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. }
                     if size.width != 0 && size.height != 0 => {
-                // handle waveforms
                 self.wfm_renderer.resize(&self.gl_library, size.width, size.height);
-                // handle UI
                 self.imgui_platform.handle_event(self.imgui_context.io_mut(), &self.window, &event);
-                // handle OpenGL
                 self.gl_surface.resize(&self.gl_context,
                     NonZeroU32::new(size.width).unwrap(),
                     NonZeroU32::new(size.height).unwrap(),
@@ -411,29 +711,27 @@ fn main() {
         GlowContext::from_loader_function_cstr(|func|
             gl_config.display().get_proc_address(func).cast())
     };
-    // configure UI for DPI awareness
+    // determine UI scale
     let scale_factor = window.scale_factor();
     log::info!("scaling UI by a factor of {:.2}×", scale_factor);
     let window_size = LogicalSize::new(1280.0, 720.0);
     let _ = window.request_inner_size(
         PhysicalSize::<f64>::from_logical(window_size, scale_factor));
-    // create an ImGui context and connect it to the window
+    // create ImGui context
     let mut imgui_context = imgui::Context::create();
+    imgui_context.style_mut().use_light_colors();
     imgui_context.set_ini_filename(None); // disable ini autosaving
+    // create UI state
+    let font_config = imgui::FontConfig {
+        rasterizer_density: scale_factor as f32,
+        oversample_h: 1,
+        ..Default::default()
+    };
+    let ui_state = InterfaceRenderer::new(&mut imgui_context, font_config);
+    // create ImGui renderer
     let mut imgui_platform = imgui_winit_support::WinitPlatform::init(&mut imgui_context);
     imgui_platform.attach_window(imgui_context.io_mut(), &window,
         imgui_winit_support::HiDpiMode::Locked(scale_factor));
-    imgui_context.fonts().add_font(&[
-        imgui::FontSource::TtfData {
-            data: include_bytes!("DejaVuSansMono.ttf"),
-            size_pixels: 18.0,
-            config: Some(imgui::FontConfig {
-                rasterizer_density: scale_factor as f32,
-                oversample_h: 1,
-                ..Default::default()
-            })
-        }
-    ]);
     let mut imgui_texture_map = imgui_glow_renderer::SimpleTextureMap::default();
     let imgui_renderer = imgui_glow_renderer::Renderer::initialize(&gl_library,
             &mut imgui_context, &mut imgui_texture_map, /*output_srgb=*/true)
@@ -465,6 +763,7 @@ fn main() {
             imgui_platform,
             imgui_texture_map,
             imgui_renderer,
+            ui_state,
             window
         };
         event_loop.run(|event, window_target|
