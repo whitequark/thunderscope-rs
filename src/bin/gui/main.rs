@@ -298,8 +298,8 @@ impl WaveformRenderer {
     }
 }
 
-mod ui_style {
-    pub const FONT_DEFAULT_DATA: &[u8] = include_bytes!("DejaVuSans.ttf");
+mod ui_defs {
+    pub const FONT_DEFAULT_DATA: &[u8] = include_bytes!("DejaVuSansMono.ttf");
     pub const FONT_DEFAULT_SIZE: f32 = 18.0;
 
     pub const FONT_CONTROLS_DATA: &[u8] = include_bytes!("DejaVuSans-Bold.ttf");
@@ -316,11 +316,115 @@ mod ui_style {
     pub const CONTROLS_TRIGGER_WIDTH: f32 = 120.0;
     pub const CONTROLS_RUN_STOP_WIDTH: f32 = 72.0;
 
+    pub const CHANNEL_V_PADDING: f32 = 10.0;
+
     pub const MARKER_FILL_COLOR: [f32; 4] = [1.0, 0.5, 0.0, 1.0];
     pub const MARKER_LINE_COLOR: [f32; 4] = [0.8, 0.4, 0.0, 1.0];
     pub const MARKER_TEXT_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
     pub const DEBUG_COLOR: [f32; 4] = [0.8, 0.0, 0.8, 1.0];
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChannelLayoutMetrics {
+    inner_height: f32, // in logical px
+    outer_height: f32, // in logical px; inner_height + padding
+    zero_offset:  f32, // in volts
+    full_scale:   f32, // in volts
+}
+
+impl ChannelLayoutMetrics {
+    fn volts_to_pixels(&self, volts: f32) -> f32 {
+        // the nominal full scale is 2 V: -1 V to 1 V
+        let normalized_volts = (-volts - self.zero_offset) / self.full_scale * 2.0;
+        (normalized_volts + 1.0) * self.outer_height / 2.0
+    }
+
+    fn pixels_to_volts(&self, pixels: f32) -> f32 {
+        let normalized_volts = pixels * 2.0 / self.outer_height - 1.0;
+        -(normalized_volts / 2.0 * self.full_scale + self.zero_offset)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InterfaceLayoutMetrics {
+    overall_size:       [f32; 2], // in logical px
+    logo_width:         f32,      // in logical px
+    control_bar_height: f32,      // in logical px
+    horz_scale_height:  f32,      // in logical px
+    vert_scale_width:   f32,      // in logical px
+    channels:           [ChannelLayoutMetrics; 4],
+}
+
+impl InterfaceLayoutMetrics {
+    fn new(ui: &imgui::Ui, logo_font: imgui::FontId,
+                channel_count: usize) -> InterfaceLayoutMetrics {
+        let [overall_width, overall_height] = ui.window_size();
+        let [logo_width, logo_height] = {
+            let _t = ui.push_font(logo_font);
+            ui.calc_text_size(ui_defs::LOGO_TEXT)
+        };
+        let control_bar_height = logo_height + ui_defs::CONTROLS_V_MARGIN * 2.0;
+        let horz_scale_height = 32.0; // FIXME
+        let vert_scale_width = 100.0;  // FIXME
+        let channel_area_height = overall_height - control_bar_height - horz_scale_height -
+            ui_defs::CHANNEL_V_PADDING;
+        let channel_outer_height = channel_area_height / channel_count as f32;
+        let mut channels = [ChannelLayoutMetrics::default(); 4];
+        for index in 0..channel_count {
+            channels[index].outer_height = channel_outer_height;
+            channels[index].inner_height = channel_outer_height - ui_defs::CHANNEL_V_PADDING * 2.0;
+            channels[index].zero_offset = 0.0; // FIXME
+            channels[index].full_scale  = 10.0; // FIXME
+        }
+        InterfaceLayoutMetrics {
+            overall_size: [overall_width, overall_height],
+            logo_width,
+            control_bar_height,
+            horz_scale_height,
+            vert_scale_width,
+            channels,
+        }
+    }
+
+    fn volts_to_pixels(&self, index: usize, volts: f32) -> f32 {
+        let mut offset = self.control_bar_height + self.horz_scale_height;
+        for index_above in 0..index {
+            offset += self.channels[index_above].outer_height;
+        }
+        offset += self.channels[index].volts_to_pixels(volts);
+        offset
+    }
+
+    fn pixels_to_volts(&self, index: usize, pixels: f32) -> f32 {
+        let mut offset = pixels;
+        offset -= self.control_bar_height + self.horz_scale_height;
+        for index_above in 0..index {
+            offset -= self.channels[index_above].outer_height;
+        }
+        dbg!(offset);
+        self.channels[index].pixels_to_volts(offset)
+    }
+
+    fn channel_rect(&self, index: usize) -> ([f32; 2], [f32; 2]) {
+        let mut vert_offset = self.control_bar_height + self.horz_scale_height;
+        for index_above in 0..index {
+            vert_offset += self.channels[index_above].outer_height;
+        }
+        let [overall_width, _] = self.overall_size;
+        let channel_height = self.channels[index].outer_height;
+        ([self.vert_scale_width, vert_offset],
+         [overall_width - ui_defs::CONTROLS_H_SPACING, vert_offset + channel_height])
+    }
+
+    fn trace_origin(&self, index: usize) -> [f32; 2] {
+        let mut vert_offset = 0.0;
+        for index_above in 0..index {
+            vert_offset += self.channels[index_above].outer_height;
+        }
+        vert_offset += self.channels[index].outer_height / 2.0;
+        [self.vert_scale_width, vert_offset]
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Default)]
@@ -360,25 +464,38 @@ impl InterfaceRenderer {
             },
         ];
         let _default_font = context.fonts().add_font(
-            &ttf_font(ui_style::FONT_DEFAULT_DATA, ui_style::FONT_DEFAULT_SIZE));
+            &ttf_font(ui_defs::FONT_DEFAULT_DATA, ui_defs::FONT_DEFAULT_SIZE));
         let controls_font = context.fonts().add_font(
-            &ttf_font(ui_style::FONT_CONTROLS_DATA, ui_style::FONT_CONTROLS_SIZE));
+            &ttf_font(ui_defs::FONT_CONTROLS_DATA, ui_defs::FONT_CONTROLS_SIZE));
         let logo_font = context.fonts().add_font(
-            &ttf_font(ui_style::FONT_LOGO_DATA, ui_style::FONT_LOGO_SIZE));
+            &ttf_font(ui_defs::FONT_LOGO_DATA, ui_defs::FONT_LOGO_SIZE));
         Self {
             controls_font,
             logo_font,
             dragging_h_marker: Cell::new(false),
             h_marker_pos: Cell::new(100.0),
             dragging_v_marker: Cell::new(false),
-            v_marker_pos: Cell::new(100.0),
+            v_marker_pos: Cell::new(3.3),
         }
     }
 
     fn render_logo(&self, ui: &imgui::Ui) -> [f32; 2] {
         let _t = ui.push_font(self.logo_font);
-        ui.text_colored(ui_style::LOGO_COLOR, ui_style::LOGO_TEXT);
-        ui.calc_text_size(ui_style::LOGO_TEXT)
+        let [w, _] = ui.cursor_pos();
+        let [_, mut h] = ui.clone_style().window_padding;
+        h -= ui.clone_style().frame_padding[1];
+        ui.set_cursor_pos([w, h]);
+        let logo_color = unsafe {
+            let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
+            let h = ui.frame_count() as f32 / 1000.0;
+            imgui::sys::igColorConvertHSVtoRGB(h, 1.0, 1.0,
+                &mut r as *mut f32,
+                &mut g as *mut f32,
+                &mut b as *mut f32);
+            [r, g, b, 1.0]
+        };
+        ui.text_colored(logo_color, ui_defs::LOGO_TEXT);
+        ui.calc_text_size(ui_defs::LOGO_TEXT)
     }
 
     fn render_minimap(&self, ui: &imgui::Ui, width: f32, height: f32) {
@@ -390,7 +507,7 @@ impl InterfaceRenderer {
             let draw_list = ui.get_window_draw_list();
             let ([x, y], [w, h]) = (ui.window_pos(), ui.window_size());
             draw_list
-                .add_rect([x, y], [x + w, y + h], ui_style::DEBUG_COLOR)
+                .add_rect([x, y], [x + w, y + h], ui_defs::DEBUG_COLOR)
                 .build();
         });
     }
@@ -421,11 +538,13 @@ impl InterfaceRenderer {
         use imgui::*;
 
         self.with_controls_style(ui, || {
-            let _t = ui.push_style_color(StyleColor::Text, [0.0, 1.0, 0.0, 1.0]);
+            //let _t = ui.push_style_color(StyleColor::Text, [0.0, 1.0, 0.0, 1.0]);
+            let _t = ui.push_style_color(StyleColor::Text, [1.0, 0.0, 0.0, 1.0]);
             ui.button_with_size("STOP", [width, height])
         })
     }
 
+    /*
     fn render_trigger_offset_marker(&self, ui: &imgui::Ui) {
         let draw_list = ui.get_window_draw_list();
 
@@ -462,13 +581,20 @@ impl InterfaceRenderer {
             .thickness(1.0).build();
         draw_list.add_text([x-wt/2.0, y-2.5-ht-5.0], ui_style::MARKER_TEXT_COLOR, text);
     }
+    */
 
-    fn render_trigger_level_marker(&self, ui: &imgui::Ui) {
+    fn render_trigger_level_marker(&self, ui: &imgui::Ui, metrics: &InterfaceLayoutMetrics) {
         let draw_list = ui.get_window_draw_list();
 
-        let text = format!("{:.2}V", (TRIGGER_LEVEL.load(Ordering::SeqCst) as f32 * 5.0 / 128.0));
+        let channel_index = 1;
 
-        let [x, y] = [80.0, self.v_marker_pos.get()];
+        let ([l, t], [r, b]) = metrics.channel_rect(channel_index);
+        draw_list.add_rect([l, t], [r, b], ui_defs::DEBUG_COLOR).build();
+
+        let volts = self.v_marker_pos.get();
+        let text = format!("{:+.2}V", volts);
+
+        let [x, y] = [metrics.vert_scale_width-8.0, metrics.volts_to_pixels(channel_index, volts)];
         let [wt, ht] = ui.calc_text_size(text.as_str());
         let [wp, hp] = [wt+5.0, ht+5.0];
         let mut marker_outline = vec![
@@ -479,35 +605,34 @@ impl InterfaceRenderer {
             [x-5.0, y+hp/2.0],
             [x, y],
         ];
-        let color = ui_style::MARKER_FILL_COLOR;
-        if self.dragging_v_marker.get() {
-            if ui.is_mouse_down(imgui::MouseButton::Left) {
-                let [_, y] = ui.io().mouse_pos;
-                self.v_marker_pos.set(y);
-
-                let [_, h] = ui.window_size();
-                TRIGGER_LEVEL.store((-((y-h/2.0)/h)*256.0) as i8, Ordering::SeqCst);
-            } else {
-                self.dragging_v_marker.set(false);
-            }
-        } else if ui.is_mouse_hovering_rect([x-5.0-wp, y-hp/2.0], [x, y+hp/2.0]) {
-            if ui.is_mouse_down(imgui::MouseButton::Left) {
-                self.dragging_v_marker.set(true)
+        let color = ui_defs::MARKER_FILL_COLOR;
+        if !self.dragging_h_marker.get() {
+            if self.dragging_v_marker.get() {
+                if ui.is_mouse_down(imgui::MouseButton::Left) {
+                    let [_, y] = ui.io().mouse_pos;
+                    self.v_marker_pos.set(metrics.pixels_to_volts(channel_index, y.max(t).min(b)));
+                } else {
+                    self.dragging_v_marker.set(false);
+                }
+            } else if ui.is_mouse_hovering_rect([x-5.0-wp, y-hp/2.0], [x, y+hp/2.0]) {
+                if ui.is_mouse_down(imgui::MouseButton::Left) {
+                    self.dragging_v_marker.set(true)
+                }
             }
         }
         draw_list.add_polyline(marker_outline.clone(), color)
             .filled(true).build();
-        marker_outline.push([x+800.0, y]);
-        draw_list.add_polyline(marker_outline, ui_style::MARKER_LINE_COLOR)
+        marker_outline.push([r, y]);
+        draw_list.add_polyline(marker_outline, ui_defs::MARKER_LINE_COLOR)
             .thickness(1.0).build();
-        draw_list.add_text([x-wt-5.0, y-ht/2.0], ui_style::MARKER_TEXT_COLOR, text.as_str());
+        draw_list.add_text([x-wt-7.5, y-ht/2.0], ui_defs::MARKER_TEXT_COLOR, text.as_str());
     }
 
     fn render_controls(&self, ui: &imgui::Ui, state: &mut InterfaceState) {
         use imgui::*;
 
         let _t = ui.push_style_var(StyleVar::WindowPadding(
-            [ui_style::CONTROLS_H_SPACING, ui_style::CONTROLS_V_MARGIN]));
+            [ui_defs::CONTROLS_H_SPACING, ui_defs::CONTROLS_V_MARGIN]));
         let _t = ui.window("##main")
             .size(ui.io().display_size, Condition::Always)
             .position([0.0, 0.0], Condition::Always)
@@ -515,36 +640,28 @@ impl InterfaceRenderer {
             .draw_background(false)
             .bring_to_front_on_focus(false)
             .begin();
+        let metrics = InterfaceLayoutMetrics::new(ui, self.logo_font, 2);
         ui.group(|| {
             let _t = ui.push_style_var(StyleVar::ItemSpacing(
-                [ui_style::CONTROLS_H_SPACING, 0.0]));
-            let [_, logo_height] = self.render_logo(ui);
+                [ui_defs::CONTROLS_H_SPACING, 0.0]));
+            let control_height = metrics.control_bar_height - ui_defs::CONTROLS_V_MARGIN * 2.0;
+            state.run_stop_clicked = self.render_run_stop(ui,
+                ui_defs::CONTROLS_RUN_STOP_WIDTH, control_height);
             ui.same_line();
-            self.render_minimap(ui,
-                -(ui_style::CONTROLS_TRIGGER_WIDTH  + ui_style::CONTROLS_H_SPACING +
-                  ui_style::CONTROLS_RUN_STOP_WIDTH + ui_style::CONTROLS_H_SPACING),
-                logo_height);
+            state.trigger_clicked = self.render_trigger_config(ui,
+                ui_defs::CONTROLS_TRIGGER_WIDTH, control_height);
             ui.same_line();
-            state.trigger_clicked =
-                self.render_trigger_config(ui, ui_style::CONTROLS_TRIGGER_WIDTH, logo_height);
+            let logo_width = metrics.logo_width + ui_defs::CONTROLS_H_SPACING;
+            self.render_minimap(ui, -logo_width, control_height);
             ui.same_line();
-            state.run_stop_clicked =
-                self.render_run_stop(ui, ui_style::CONTROLS_RUN_STOP_WIDTH, logo_height);
+            self.render_logo(ui);
 
-            self.render_trigger_offset_marker(ui);
-            self.render_trigger_level_marker(ui);
+            // self.render_trigger_offset_marker(ui);
+            self.render_trigger_level_marker(ui, &metrics);
         });
     }
 
     fn render_trigger_config_popup(&self, ui: &imgui::Ui) {
-        use imgui::*;
-
-        unsafe {
-            sys::igSetNextWindowPos(
-                ui.mouse_pos_on_opening_current_popup().into(),
-                sys::ImGuiCond_Appearing as i32,
-                sys::ImVec2::new(1.0, 0.0));
-        };
         ui.popup("Trigger", || {
             use thunderscope::EdgeFilter;
 
