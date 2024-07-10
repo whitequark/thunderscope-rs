@@ -5,8 +5,8 @@ mod regs;
 mod config;
 mod params;
 mod device;
+mod buffer;
 mod trigger;
-mod capture;
 
 #[derive(Debug)]
 pub enum Error {
@@ -110,7 +110,7 @@ pub use trigger::{
     Trigger,
 };
 
-pub use capture::{
+pub use buffer::{
     RingCursor,
     RingBuffer,
 };

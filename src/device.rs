@@ -38,7 +38,7 @@ impl Device {
 }
 
 impl Device {
-    fn read_user_u32(&mut self, addr: usize) -> Result<u32> {
+    fn read_user_u32(&self, addr: usize) -> Result<u32> {
         let mut bytes = [0u8; 4];
         self.driver.read_user(addr, &mut bytes[..])?;
         let data = u32::from_le_bytes(bytes);
@@ -46,37 +46,37 @@ impl Device {
         Ok(data)
     }
 
-    fn write_user_u32(&mut self, addr: usize, data: u32) -> Result<()> {
+    fn write_user_u32(&self, addr: usize, data: u32) -> Result<()> {
         log::trace!("write_user_u32({:#x}, {:#x})", addr, data);
         let bytes = u32::to_le_bytes(data);
         self.driver.write_user(addr, &bytes[..])?;
         Ok(())
     }
 
-    fn read_control(&mut self) -> Result<Control> {
+    fn read_control(&self) -> Result<Control> {
         let value = Control::from_bits_retain(self.read_user_u32(axi::ADDR_CONTROL)?);
         log::debug!("read_control() = {:?}", value);
         Ok(value)
     }
 
-    fn write_control(&mut self, value: Control) -> Result<()> {
+    fn write_control(&self, value: Control) -> Result<()> {
         log::debug!("write_control({:?})", value);
         Ok(self.write_user_u32(axi::ADDR_CONTROL, value.bits())?)
     }
 
-    fn modify_control<F: FnOnce(&mut Control)>(&mut self, f: F) -> Result<()> {
+    fn modify_control<F: FnOnce(&mut Control)>(&self, f: F) -> Result<()> {
         let mut value = self.read_control()?;
         f(&mut value);
         self.write_control(value)
     }
 
-    fn read_status(&mut self) -> Result<Status> {
+    fn read_status(&self) -> Result<Status> {
         let value = Status::from_bits_retain(self.read_user_u32(axi::ADDR_STATUS)?);
         log::trace!("read_status() = {:?}", value);
         Ok(value)
     }
 
-    fn write_fifo(&mut self, data: &[u8]) -> Result<()> {
+    fn write_fifo(&self, data: &[u8]) -> Result<()> {
         log::trace!("write_fifo({:02x?})", data);
         // enqueue data into the FIFO
         for &byte in data {
@@ -96,7 +96,7 @@ impl Device {
         Ok(())
     }
 
-    fn write_i2c(&mut self, i2c_addr: u8, data: &[u8]) -> Result<()> {
+    fn write_i2c(&self, i2c_addr: u8, data: &[u8]) -> Result<()> {
         log::debug!("write_i2c({:#08b}, {:02x?})", i2c_addr, data);
         let mut packet = Vec::<u8>::new();
         packet.push(0xff);        // select I2C
@@ -111,7 +111,7 @@ impl Device {
 
     // bus 0 (0xfd): ADC
     // bus 2..5 (0xfb..0xf7): PGAn
-    fn write_spi(&mut self, spi_bus: u8, data: &[u8]) -> Result<()> {
+    fn write_spi(&self, spi_bus: u8, data: &[u8]) -> Result<()> {
         log::debug!("write_spi({:?}, {:02x?})", spi_bus, data);
         let mut packet = Vec::<u8>::new();
         packet.push(0xfd - spi_bus);
@@ -123,7 +123,7 @@ impl Device {
         Ok(())
     }
 
-    fn write_pll_register(&mut self, reg_addr: u16, value: u8) -> Result<()> {
+    fn write_pll_register(&self, reg_addr: u16, value: u8) -> Result<()> {
         log::debug!("write_pll_register({:#06x}, {:#04x})", reg_addr, value);
         self.write_i2c(0b11101000, &[
             0x02,                  // register write
@@ -133,14 +133,14 @@ impl Device {
         ])
     }
 
-    fn init_pll_registers(&mut self, init_words: &[u32]) -> Result<()> {
+    fn init_pll_registers(&self, init_words: &[u32]) -> Result<()> {
         for &init_word in init_words {
             self.write_pll_register((init_word >> 8) as u16, init_word as u8)?;
         }
         Ok(())
     }
 
-    fn write_adc_register(&mut self, reg_addr: u8, value: u16) -> Result<()> {
+    fn write_adc_register(&self, reg_addr: u8, value: u16) -> Result<()> {
         log::debug!("write_adc_register({:#04x}, {:#06x})", reg_addr, value);
         self.write_spi(SPI_BUS_ADC, &[
             reg_addr,
@@ -149,14 +149,14 @@ impl Device {
         ])
     }
 
-    fn init_adc_registers(&mut self, init_pairs: &[(u8, u16)]) -> Result<()> {
+    fn init_adc_registers(&self, init_pairs: &[(u8, u16)]) -> Result<()> {
         for &(reg_addr, value) in init_pairs {
             self.write_adc_register(reg_addr, value)?;
         }
         Ok(())
     }
 
-    fn enable_adc_channels(&mut self, enabled: [bool; 4]) -> Result<()> {
+    fn enable_adc_channels(&self, enabled: [bool; 4]) -> Result<()> {
         log::debug!("enable_adc_channels({:?})", enabled);
         // compute number of enabled ADC channels and ADC clock divisor
         // channels CH1..CH4 on the faceplate are mapped to IN4..IN1 on the ADC, so this function
@@ -211,7 +211,7 @@ impl Device {
         Ok(())
     }
 
-    fn write_pga_command(&mut self, pga_bus: u8, command: u16) -> Result<()> {
+    fn write_pga_command(&self, pga_bus: u8, command: u16) -> Result<()> {
         log::debug!("write_pga_command({:?}, {:#06x})", pga_bus, command);
         self.write_spi(pga_bus, &[
             0x00, // write command word
@@ -220,7 +220,7 @@ impl Device {
         ])
    }
 
-   fn configure_pga(&mut self, index: usize, params: &ChannelParameters) -> Result<()> {
+   fn configure_pga(&self, index: usize, params: &ChannelParameters) -> Result<()> {
         self.write_pga_command(SPI_BUS_PGA[index],
             (1 << 10) | // always turn off auxiliary output to save power
             params.filtering.lmh6518_code() |
@@ -229,7 +229,7 @@ impl Device {
         )
     }
 
-   fn write_digipot_input(&mut self, addr: u8, input: u16) -> Result<()> {
+   fn write_digipot_input(&self, addr: u8, input: u16) -> Result<()> {
         let command_data =
             ((addr as u16) << 12) | // device address
             (0b00 << 10) | // write
@@ -240,7 +240,7 @@ impl Device {
         ])
    }
 
-   fn write_trimdac_input(&mut self, channel: u8, input: u16) -> Result<()> {
+   fn write_trimdac_input(&self, channel: u8, input: u16) -> Result<()> {
         log::debug!("write_trimdac_input({:?}, {:#06x})", channel, input);
         self.write_i2c(0b1100000, &[
             0b01011_00_0 | ((channel & 0b11) << 1),
@@ -249,7 +249,7 @@ impl Device {
         ])
    }
 
-   fn configure_digipot_trimdac(&mut self, index: usize, params: &ChannelParameters) -> Result<()> {
+   fn configure_digipot_trimdac(&self, index: usize, params: &ChannelParameters) -> Result<()> {
         const WIPER_ADDRESS: [u8; 4] = [0x6, 0x0, 0x1, 0x7];
         self.write_digipot_input(WIPER_ADDRESS[index],
             params.offset_magnitude.mcp4432t_503e_code())?;
@@ -260,13 +260,13 @@ impl Device {
         Ok(())
     }
 
-    fn enable_datamover(&mut self) -> Result<()> {
+    fn enable_datamover(&self) -> Result<()> {
         // take the acquisition system out of reset
         self.modify_control(|val| val.insert(Control::DatamoverHaltN | Control::FpgaAcqResetN))?;
         Ok(())
     }
 
-    fn disable_datamover(&mut self) -> Result<()> {
+    fn disable_datamover(&self) -> Result<()> {
         // halt the data mover
         self.modify_control(|val| val.remove(Control::DatamoverHaltN))?;
         // wait for data mover to halt
@@ -276,7 +276,7 @@ impl Device {
         Ok(())
     }
 
-    pub fn configure(&mut self, params: &DeviceParameters) -> Result<()> {
+    pub fn configure(&self, params: &DeviceParameters) -> Result<()> {
         if *params == Default::default() {
             log::info!("configure(DeviceParameters::default())");
         } else {
@@ -327,7 +327,7 @@ impl Device {
         Ok(())
     }
 
-    pub fn startup(&mut self) -> Result<()> {
+    pub fn startup(&self) -> Result<()> {
         log::info!("startup()");
         // disable the data mover first and let it stop, in case it was running before
         // this prevents device crashes after unclean shutdowns (think ^C)
@@ -397,7 +397,7 @@ impl Device {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&self) -> Result<()> {
         log::info!("shutdown()");
         // disable the data mover first and let it stop, since it runs on ADC clock
         self.disable_datamover()?;
@@ -406,14 +406,14 @@ impl Device {
         Ok(())
     }
 
-    pub fn stream_data<'a>(&'a mut self) -> Streamer<'a> {
+    pub fn stream_data<'a>(&'a self) -> Streamer<'a> {
         Streamer { device: self, cursor: None }
     }
 }
 
 #[derive(Debug)]
 pub struct Streamer<'a> {
-    device: &'a mut Device,
+    device: &'a Device,
     cursor: Option<usize>,
 }
 

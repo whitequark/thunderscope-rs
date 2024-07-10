@@ -174,7 +174,8 @@ impl RingBuffer {
     }
 
     pub fn read(&self, cursor: RingCursor, count: usize) -> &[i8] {
-        assert!(cursor.bound == self.buffer.len() && count <= self.buffer.len());
+        assert!(cursor.bound == self.buffer.len());
+        assert!(count <= self.buffer.len());
         bytemuck::cast_slice(&self.buffer[cursor.index..][..count])
     }
 }
