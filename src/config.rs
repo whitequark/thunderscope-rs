@@ -25,14 +25,27 @@ pub enum Bandwidth {
     MHz350,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelConfiguration {
+    /// Probe attenuation in dB. For a 1X probe, `0.0`; for a 10X probe, `20.0`.
+    pub probe_attenuation: f32,
     pub termination: Termination,
     pub coupling: Coupling,
     pub bandwidth: Bandwidth,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl Default for ChannelConfiguration {
+    fn default() -> Self {
+        Self {
+            probe_attenuation: 20.0, // 10X probe
+            termination: Default::default(),
+            coupling: Default::default(),
+            bandwidth: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceConfiguration {
     pub channels: [Option<ChannelConfiguration>; 4]
 }

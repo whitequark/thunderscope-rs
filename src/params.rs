@@ -14,6 +14,16 @@ pub enum CoarseAttenuation {
     X50,
 }
 
+impl CoarseAttenuation {
+    /// Gain in this part of the signal path, in dB.
+    fn gain(self) -> f32 {
+        match self {
+            CoarseAttenuation::X1  =>   0.0,
+            CoarseAttenuation::X50 => -33.9794,
+        }
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Amplification {
@@ -28,6 +38,14 @@ impl Amplification {
             Self::dB10 => 0b0, // "low gain"
             Self::dB30 => 0b1, // "high gain"
         }) << 4
+    }
+
+    /// Gain in this part of the signal path, in dB.
+    fn gain(self) -> f32 {
+        match self {
+            Amplification::dB10 => 10.0,
+            Amplification::dB30 => 30.0,
+        }
     }
 }
 
@@ -63,6 +81,23 @@ impl FineAttenuation {
             Self::dB18 => 0b1001,
             Self::dB20 => 0b1010,
         }) << 0
+    }
+
+    /// Gain in this part of the signal path, in dB.
+    fn gain(self) -> f32 {
+        match self {
+            FineAttenuation::dB0  =>  -0.0,
+            FineAttenuation::dB2  =>  -2.0,
+            FineAttenuation::dB4  =>  -4.0,
+            FineAttenuation::dB6  =>  -6.0,
+            FineAttenuation::dB8  =>  -8.0,
+            FineAttenuation::dB10 => -10.0,
+            FineAttenuation::dB12 => -12.0,
+            FineAttenuation::dB14 => -14.0,
+            FineAttenuation::dB16 => -16.0,
+            FineAttenuation::dB18 => -18.0,
+            FineAttenuation::dB20 => -20.0,
+        }
     }
 }
 
@@ -139,8 +174,9 @@ impl OffsetValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ChannelParameters {
+    pub probe_attenuation: f32, // in dB
     pub termination: Termination,
     pub coupling: Coupling,
     pub coarse_attenuation: CoarseAttenuation,
@@ -151,7 +187,20 @@ pub struct ChannelParameters {
     pub offset_value: OffsetValue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl ChannelParameters {
+    /// Returns total gain in the instrument signal path, in decibels.
+    fn gain(&self, adc_coarse_gain: f32) -> f32 {
+        -self.probe_attenuation
+            + self.coarse_attenuation.gain() // 1X/50X attenuation switch
+            + self.amplification.gain()      // LMH6518 pre-amplifier
+            + self.fine_attenuation.gain()   // LMH6518 ladder attenuator
+            + 8.8600                         // LMH6518 output amplifier
+            + adc_coarse_gain                // HMCAD1520 coarse gain
+            - 0.3546                         // HMCAD1520 full scale adjustment
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeviceParameters {
     pub channels: [Option<ChannelParameters>; 4],
 }
@@ -161,6 +210,42 @@ impl Default for DeviceParameters {
         DeviceParameters {
             channels: [Some(ChannelParameters::default()); 4]
         }
+    }
+}
+
+impl DeviceParameters {
+    /// Returns total gain in the instrument signal path for the given channel, in decibels.
+    pub fn gain(&self, channel_index: usize) -> f32 {
+        let channel_count = self.channels.iter().filter(|ch| ch.is_some()).count();
+        assert!(channel_count > 0 && self.channels[channel_index].is_some());
+        let adc_coarse_gain = match channel_count {
+            4 |
+            3 |
+            2 =>  9.0,
+            1 => 10.0,
+            _ => unreachable!()
+        };
+        self.channels[channel_index].unwrap().gain(adc_coarse_gain)
+    }
+
+    /// Returns the voltage difference (as measured at the probe) between the most negative and
+    /// most positive ADC code for the given channel, in volts.
+    pub fn full_scale(&self, channel_index: usize) -> f32 {
+        2.0 * 10.0f32.powf(-self.gain(channel_index) / 20.0)
+    }
+
+    /// Converts a voltage (as measured at the probe) to the ADC code, saturating to the most
+    /// negative or most positive code for out of range values.
+    pub fn volts_to_code(&self, channel_index: usize, volts: f32) -> i8 {
+        let full_scale = self.full_scale(channel_index);
+        // Since Rust 1.45 this performs a saturating cast. Nice!
+        (256.0 * (volts / full_scale)) as i8
+    }
+
+    /// Converts an ADC code to voltage (as measured at the probe).
+    pub fn code_to_volts(&self, channel_index: usize, code: i8) -> f32 {
+        let full_scale = self.full_scale(channel_index);
+        code as f32 / 256.0 * full_scale
     }
 }
 
@@ -178,6 +263,7 @@ impl DeviceParameters {
         fn derive_channel(_calibration: &ChannelCalibration,
                 configuration: &ChannelConfiguration) -> ChannelParameters {
             ChannelParameters {
+                probe_attenuation: configuration.probe_attenuation,
                 termination: configuration.termination,
                 coupling: configuration.coupling,
                 coarse_attenuation: CoarseAttenuation::X1, // FIXME

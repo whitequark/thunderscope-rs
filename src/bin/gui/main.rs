@@ -52,14 +52,18 @@ impl std::io::Read for SineGenerator {
 
 #[derive(Debug)]
 struct Waveform {
+    params: thunderscope::DeviceParameters,
     buffer: thunderscope::RingBuffer,
     capture: Option<(thunderscope::RingCursor, usize)>
 }
 
 impl Waveform {
     pub fn new(size: usize) -> thunderscope::Result<Waveform> {
-        let buffer = thunderscope::RingBuffer::new(size)?;
-        Ok(Waveform { buffer, capture: None })
+        Ok(Waveform {
+            params: thunderscope::DeviceParameters::default(),
+            buffer: thunderscope::RingBuffer::new(size)?,
+            capture: None
+        })
     }
 
     pub fn capture_data(&self) -> Option<&[i8]> {
@@ -87,19 +91,22 @@ impl WaveformSampler {
     pub fn run(mut self, instrument: Option<thunderscope::Device>)
             -> std::thread::JoinHandle<thunderscope::Result<()>> {
         thread::spawn(move || {
+            let params = thunderscope::DeviceParameters::derive(
+                &thunderscope::DeviceCalibration::default(),
+                &thunderscope::DeviceConfiguration {
+                    channels: [Some(thunderscope::ChannelConfiguration {
+                        ..Default::default()
+                    }), None, None, None]
+            });
             match instrument {
-                None =>
-                    self.trigger_and_capture(SineGenerator::new(12.0 / SAMPLE_COUNT as f32))?,
+                None => {
+                    let sine_generator = SineGenerator::new(12.0 / SAMPLE_COUNT as f32);
+                    self.trigger_and_capture(&params, sine_generator)?
+                }
                 Some(mut instrument) => {
                     instrument.startup()?;
-                    instrument.configure(&thunderscope::DeviceParameters::derive(
-                        &thunderscope::DeviceCalibration::default(),
-                        &thunderscope::DeviceConfiguration {
-                            channels: [Some(thunderscope::ChannelConfiguration {
-                                ..Default::default()
-                            }), None, None, None]
-                        }))?;
-                    self.trigger_and_capture(instrument.stream_data())?;
+                    instrument.configure(&params)?;
+                    self.trigger_and_capture(&params, instrument.stream_data())?;
                     instrument.shutdown()?;
                 }
             }
@@ -107,8 +114,8 @@ impl WaveformSampler {
         })
     }
 
-    fn trigger_and_capture<R>(&mut self, mut reader: R) -> thunderscope::Result<()>
-            where R: std::io::Read {
+    fn trigger_and_capture(&mut self, params: &thunderscope::DeviceParameters,
+            mut reader: impl std::io::Read) -> thunderscope::Result<()> {
         let mut wfm_active = self.waveform_recv.recv().expect("failed to receive waveform");
         let mut wfm_standby = None;
         let mut trigger = thunderscope::Trigger::new(TRIGGER_LEVEL.load(Ordering::SeqCst), 2);
@@ -125,6 +132,7 @@ impl WaveformSampler {
                 }
             }
             // set up capturing in active buffer
+            wfm_active.params = *params;
             wfm_active.capture = None;
             let mut cursor = wfm_active.buffer.cursor();
             let mut available = 0;
