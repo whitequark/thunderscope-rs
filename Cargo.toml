@@ -14,6 +14,10 @@ required-features = ["gui"]
 name = "thunderscope-test"
 path = "src/bin/test.rs"
 
+[[bin]]
+name = "thunderscope-dc_offset"
+path = "src/bin/cal/dc_offset.rs"
+
 [dependencies]
 log = "0.4"
 env_logger = "0.11"
