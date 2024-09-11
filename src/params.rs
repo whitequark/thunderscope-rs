@@ -15,6 +15,11 @@ pub enum CoarseAttenuation {
 }
 
 impl CoarseAttenuation {
+    pub const ALL: [Self; 2] = [
+        Self::X1,
+        Self::X50,
+    ];
+
     /// Gain in this part of the signal path, in dB.
     fn gain(self) -> f32 {
         match self {
@@ -33,6 +38,11 @@ pub enum Amplification {
 }
 
 impl Amplification {
+    pub const ALL: [Self; 2] = [
+        Self::dB10,
+        Self::dB30
+    ];
+
     pub(crate) fn lmh6518_code(self) -> u16 {
         (match self {
             Self::dB10 => 0b0, // "low gain"
@@ -67,6 +77,20 @@ pub enum FineAttenuation {
 }
 
 impl FineAttenuation {
+    pub const ALL: [Self; 11] = [
+        Self::dB0,
+        Self::dB2,
+        Self::dB4,
+        Self::dB6,
+        Self::dB8,
+        Self::dB10,
+        Self::dB12,
+        Self::dB14,
+        Self::dB16,
+        Self::dB18,
+        Self::dB20,
+    ];
+
     pub(crate) fn lmh6518_code(self) -> u16 {
         (match self {
             Self::dB0  => 0b0000,
@@ -136,23 +160,27 @@ impl fmt::Debug for OffsetMagnitude {
 
 impl Default for OffsetMagnitude {
     fn default() -> Self {
-        OffsetMagnitude { code: 0x3f } // mid-scale
+        OffsetMagnitude { code: 0x40 } // mid-scale
     }
 }
 
 impl OffsetMagnitude {
-    pub(crate) fn mcp4432t_503e_code(self) -> u16 {
+    pub/*(crate)*/ fn from_mcp4432t_503e_code(code: u16) -> Self {
+        OffsetMagnitude { code }
+    }
+
+    pub/*(crate)*/ fn mcp4432t_503e_code(self) -> u16 {
         self.code
     }
 
-    pub(crate) fn from_ohms(ohms: u32) -> Self {
+    pub/*(crate)*/ fn from_ohms(ohms: u32) -> Self {
         assert!(ohms >= 75 && ohms <= 50000 + 75);
         const HALF_LSB: u32 = (50000 / 128) / 2;
         let code = (ohms - 75 + /* round to nearest */HALF_LSB) * 128 / 50000;
         OffsetMagnitude { code: code as u16 }
     }
 
-    pub(crate) fn ohms(self) -> u32 {
+    pub/*(crate)*/ fn ohms(self) -> u32 {
         self.code as u32 * 50000 / 128 + 75
     }
 }
@@ -169,7 +197,11 @@ impl Default for OffsetValue {
 }
 
 impl OffsetValue {
-    pub(crate) fn mcp4728_code(self) -> u16 {
+    pub/*(crate)*/ fn from_mcp4728_code(code: u16) -> Self {
+        OffsetValue { code }
+    }
+
+    pub/*(crate)*/ fn mcp4728_code(self) -> u16 {
         self.code
     }
 }
