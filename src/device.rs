@@ -293,6 +293,7 @@ impl Device {
                 }
                 if n == 10 {
                     log::error!("data mover failure, power cycle the device");
+                    self.write_control(Control::empty())?;
                     panic!("data mover failure: {:?} (overflow by {} cycles)",
                         status, status.overflow_cycles());
                 }
@@ -357,13 +358,13 @@ impl Device {
 
     pub fn startup(&self) -> Result<()> {
         log::info!("startup()");
+        // disable the data mover first and let it stop, in case it was running before
+        // this prevents device crashes after unclean shutdowns (think ^C)
+        self.disable_datamover()?;
         if self.read_control()? != Control::empty(){
             self.write_control(Control::empty())?;
             thread::sleep(Duration::from_secs(5));
         }
-        // disable the data mover first and let it stop, in case it was running before
-        // this prevents device crashes after unclean shutdowns (think ^C)
-        self.disable_datamover()?;
         // enable the 3V3 rail and wait for it to stabilize
         self.modify_control(|val| val.insert(Control::ClockGenResetN | Control::Rail3V3Enabled))?;
         thread::sleep(Duration::from_millis(10));
@@ -461,6 +462,7 @@ impl<'a> std::io::Read for Streamer<'a> {
             let status = self.device.read_status()?;
             if status.intersects(Status::FifoOverflow | Status::DatamoverError) {
                 log::error!("data mover failure, power cycle the device");
+                self.device.write_control(Control::empty())?;
                 panic!("data mover failure: {:?} (overflow by {} cycles)",
                     status, status.overflow_cycles());
             }
