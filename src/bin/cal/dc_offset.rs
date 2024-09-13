@@ -64,6 +64,7 @@ fn calibrate_offset(device: &Device, channel: usize, channel_params: ChannelPara
                 ..channel_params
             };
             let average_voltage = acquire_average_voltage(device, channel, channel_params)?;
+            //TODO: Make this threshold 1 LSB instead of a fixed voltage
             if average_voltage < 0.0001 && average_voltage > -0.0001 {
                     return Ok((channel_params.offset_magnitude, channel_params.offset_value))
             }
