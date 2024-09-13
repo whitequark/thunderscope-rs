@@ -24,7 +24,7 @@ fn acquire_average_voltage(device: &Device, channel: usize, channel_params: Chan
     println!("  offset value:     {:?}", offset_value);
 
     device.configure(&params)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     let mut samples = vec![0; SAMPLE_COUNT];
     device.stream_data().read_exact(samples.as_mut())?;
@@ -43,12 +43,9 @@ fn acquire_average_voltage(device: &Device, channel: usize, channel_params: Chan
 
 fn calibrate_offset(device: &Device, channel: usize, channel_params: ChannelParameters)
         -> thunderscope::Result<(OffsetMagnitude, OffsetValue)> {
-    #[derive(Debug, PartialEq, Eq)]
-    enum Polarity { Positive, Negative }
 
     println!("==> calibrate_offset {} {:?}", channel, channel_params);
 
-    let mut previous_polarity: Option<Polarity> = None;
     for offset_magnitude in (0x00..=0x7f).rev() {
         let channel_params = ChannelParameters {
             offset_magnitude: OffsetMagnitude::from_mcp4432t_503e_code(offset_magnitude),
@@ -61,22 +58,14 @@ fn calibrate_offset(device: &Device, channel: usize, channel_params: ChannelPara
         //     } else {
         //         (0x0000..=0x3fff)
         //     };
-        for offset_value in (0x0000..=0x3fff).rev() {
+        for offset_value in (0x0000..=0x3fff).step_by(200).rev() {
             let channel_params = ChannelParameters {
                 offset_value: OffsetValue::from_mcp4728_code(offset_value),
                 ..channel_params
             };
             let average_voltage = acquire_average_voltage(device, channel, channel_params)?;
-            let current_polarity = if average_voltage >= 0.0 {
-                Polarity::Positive
-            } else {
-                Polarity::Negative
-            };
-            match previous_polarity {
-                None => previous_polarity = Some(current_polarity),
-                Some(previous_polarity) if previous_polarity != current_polarity =>
-                    return Ok((channel_params.offset_magnitude, channel_params.offset_value)),
-                Some(_) => ()
+            if average_voltage < 0.0001 && average_voltage > -0.0001 {
+                    return Ok((channel_params.offset_magnitude, channel_params.offset_value))
             }
         }
     }

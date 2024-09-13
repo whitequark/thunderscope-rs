@@ -261,18 +261,46 @@ impl Device {
     }
 
     fn enable_datamover(&self) -> Result<()> {
+        println!("enable datamover");
         // take the acquisition system out of reset
-        self.modify_control(|val| val.insert(Control::DatamoverHaltN | Control::FpgaAcqResetN))?;
+        self.modify_control(|val| val.insert(Control::DatamoverHaltN))?;
+        thread::sleep(Duration::from_millis(1));
+        self.modify_control(|val| val.insert(Control::FpgaAcqResetN))?;
+        thread::sleep(Duration::from_millis(1));
+        self.modify_control(|val| val.insert(Control::SerdesResetN))?;
+        thread::sleep(Duration::from_millis(10));
         Ok(())
     }
 
     fn disable_datamover(&self) -> Result<()> {
-        // halt the data mover
-        self.modify_control(|val| val.remove(Control::DatamoverHaltN))?;
-        // wait for data mover to halt
-        thread::sleep(Duration::from_millis(5));
-        // reset the acquisition subsystem
-        self.modify_control(|val| val.remove(Control::FpgaAcqResetN))?;
+        let control = self.read_control()?;
+        if control.intersects(Control::DatamoverHaltN | Control::FpgaAcqResetN) {
+            // reset the serdes
+            self.modify_control(|val| val.remove(Control::SerdesResetN))?;
+            thread::sleep(Duration::from_millis(10));
+            
+            // halt the data mover
+            self.modify_control(|val| val.remove(Control::DatamoverHaltN))?;
+            println!("disable datamover");
+
+            // wait for data mover to halt      
+            for n in 1..11{ 
+                thread::sleep(Duration::from_millis(1)); 
+                let status = self.read_status()?;
+                if status.intersects(Status::DatamoverHalted) {
+                    //println!("break at n {}",n);
+                    break;
+                }
+                if n == 10 {
+                    log::error!("data mover failure, power cycle the device");
+                    panic!("data mover failure: {:?} (overflow by {} cycles)",
+                        status, status.overflow_cycles());
+                }
+            }
+    
+            // reset the acquisition subsystem
+            self.modify_control(|val| val.remove(Control::FpgaAcqResetN))?;
+        }
         Ok(())
     }
 
@@ -329,6 +357,10 @@ impl Device {
 
     pub fn startup(&self) -> Result<()> {
         log::info!("startup()");
+        if self.read_control()? != Control::empty(){
+            self.write_control(Control::empty())?;
+            thread::sleep(Duration::from_secs(5));
+        }
         // disable the data mover first and let it stop, in case it was running before
         // this prevents device crashes after unclean shutdowns (think ^C)
         self.disable_datamover()?;

@@ -11,6 +11,7 @@ bitflags! {
     pub struct Control: u32 {
         const DatamoverHaltN    = 1<<0;
         const FpgaAcqResetN     = 1<<1;
+        const SerdesResetN      = 1<<2;
 
         const ChannelMux0       = 1<<4;
         const ChannelMux1       = 1<<5;
@@ -75,6 +76,7 @@ bitflags! {
     // See [doc/transfer_counter_register.txt] for details.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Status: u32 {
+        const DatamoverHalted  = 1<<29;
         const FifoOverflow     = 1<<30;
         const DatamoverError   = 1<<31;
     }
@@ -82,7 +84,7 @@ bitflags! {
 
 impl Status {
     pub fn overflow_cycles(&self) -> u32 {
-        (self.bits() >> 16) & 0x3FFF
+        (self.bits() >> 18) & 0x03FF
     }
 
     pub fn pages_moved(self) -> usize {
